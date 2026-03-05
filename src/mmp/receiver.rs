@@ -360,6 +360,10 @@ impl ReceiverState {
     pub fn last_recv_time(&self) -> Option<Instant> {
         self.last_recv_time
     }
+
+    pub fn ecn_ce_count(&self) -> u32 {
+        self.ecn_ce_count
+    }
 }
 
 impl Default for ReceiverState {

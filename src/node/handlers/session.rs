@@ -43,6 +43,7 @@ impl Node {
         src_addr: &NodeAddr,
         payload: &[u8],
         path_mtu: u16,
+        ce_flag: bool,
     ) {
         let prefix = match FspCommonPrefix::parse(payload) {
             Some(p) => p,
@@ -88,7 +89,7 @@ impl Node {
                 }
             }
             FSP_PHASE_ESTABLISHED => {
-                self.handle_encrypted_session_msg(src_addr, payload, path_mtu).await;
+                self.handle_encrypted_session_msg(src_addr, payload, path_mtu, ce_flag).await;
             }
             _ => {
                 debug!(phase = prefix.phase, "Unknown FSP phase");
@@ -105,7 +106,7 @@ impl Node {
     /// 4. AEAD decrypt with AAD = header_bytes
     /// 5. Strip FSP inner header → timestamp, msg_type, inner_flags
     /// 6. Dispatch by msg_type
-    async fn handle_encrypted_session_msg(&mut self, src_addr: &NodeAddr, payload: &[u8], path_mtu: u16) {
+    async fn handle_encrypted_session_msg(&mut self, src_addr: &NodeAddr, payload: &[u8], path_mtu: u16, ce_flag: bool) {
         // Parse the 12-byte encrypted header (includes the 4-byte prefix)
         let header = match FspEncryptedHeader::parse(payload) {
             Some(h) => h,
@@ -209,7 +210,7 @@ impl Node {
         {
             let now = std::time::Instant::now();
             mmp.receiver.record_recv(
-                header.counter, timestamp, plaintext.len(), false, now,
+                header.counter, timestamp, plaintext.len(), ce_flag, now,
             );
             // Spin bit: advance state machine for correct TX reflection.
             // RTT samples not fed into SRTT — timestamp-echo provides
@@ -233,8 +234,13 @@ impl Node {
         match SessionMessageType::from_byte(msg_type) {
             Some(SessionMessageType::DataPacket) => {
                 // msg_type 0x10: deliver rest (IPv6 payload) to TUN
+                let mut packet = rest.to_vec();
+                if ce_flag {
+                    mark_ipv6_ecn_ce(&mut packet);
+                    self.stats_mut().congestion.record_ce_received();
+                }
                 if let Some(tun_tx) = &self.tun_tx {
-                    if let Err(e) = tun_tx.send(rest.to_vec()) {
+                    if let Err(e) = tun_tx.send(packet) {
                         debug!(error = %e, "Failed to deliver decrypted packet to TUN");
                     }
                 } else {
@@ -1471,4 +1477,32 @@ impl Node {
             }
         }
     }
+}
+
+/// Mark ECN-CE in an IPv6 packet's Traffic Class field.
+///
+/// IPv6 Traffic Class occupies bits across bytes 0 and 1:
+///   byte[0] bits[3:0] = TC[7:4]
+///   byte[1] bits[7:4] = TC[3:0]
+/// ECN is TC[1:0]. Only marks CE (0b11) if the packet is ECN-capable
+/// (ECT(0) or ECT(1)). Packets with ECN=0b00 (Not-ECT) are never marked
+/// per RFC 3168.
+///
+/// No checksum update needed: IPv6 has no header checksum, and the Traffic
+/// Class field is not part of the TCP/UDP pseudo-header.
+pub(in crate::node) fn mark_ipv6_ecn_ce(packet: &mut [u8]) {
+    if packet.len() < 2 {
+        return;
+    }
+    // Extract 8-bit Traffic Class from IPv6 header bytes 0-1
+    let tc = ((packet[0] & 0x0F) << 4) | (packet[1] >> 4);
+    let ecn = tc & 0x03;
+    // Only mark CE on ECN-capable packets (ECT(0)=0b10 or ECT(1)=0b01)
+    if ecn == 0 {
+        return;
+    }
+    // Set both ECN bits to 1 (CE = 0b11)
+    let new_tc = tc | 0x03;
+    packet[0] = (packet[0] & 0xF0) | (new_tc >> 4);
+    packet[1] = (new_tc << 4) | (packet[1] & 0x0F);
 }

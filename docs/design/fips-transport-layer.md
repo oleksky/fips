@@ -215,8 +215,15 @@ buffer fills in ~2.5 ms; any stall in the async receive loop (decryption,
 routing, forwarding overhead) causes the kernel to silently drop incoming
 datagrams.
 
-FIPS uses the `socket2` crate to configure socket buffers at bind time,
-before the receive loop starts:
+FIPS uses `socket2::Socket` wrapped in `tokio::io::unix::AsyncFd` for the
+UDP receive path. This replaces `tokio::UdpSocket` and enables direct
+`libc::recvmsg()` calls with ancillary data parsing — specifically the
+`SO_RXQ_OVFL` socket option, which delivers a cumulative kernel receive
+buffer drop counter on every received packet. The drop counter feeds into
+the ECN congestion detection system (see
+[fips-mesh-layer.md](fips-mesh-layer.md#ecn-congestion-signaling)).
+
+Socket buffers are configured at bind time via `socket2`:
 
 | Parameter        | Default | Description                          |
 | ---------------- | ------- | ------------------------------------ |
@@ -486,6 +493,7 @@ start()               → lifecycle           Bring transport up (bind socket, o
 stop()                → lifecycle           Bring transport down
 send(addr, data)      → delivery            Send datagram to transport address
 close_connection(addr)→ ()                  Close a specific connection (no-op for connectionless)
+congestion()          → TransportCongestion  Local congestion indicators (optional)
 discover()            → Vec<DiscoveredPeer> Report discovered FIPS endpoints (optional)
 auto_connect()        → bool                Auto-connect discovered peers (default: false)
 accept_connections()  → bool                Accept inbound handshakes (default: true)
@@ -520,6 +528,30 @@ TransportType {
 
 Predefined types exist for UDP, TCP, Ethernet, WiFi, Tor, and Serial.
 
+### Congestion Reporting
+
+Transports optionally report local congestion indicators via a
+`TransportCongestion` struct, providing a transport-agnostic interface for
+the node layer's ECN congestion detection:
+
+```text
+TransportCongestion {
+    recv_drops: Option<u64>    Cumulative kernel-dropped packets (monotonic)
+}
+```
+
+The node samples each transport's congestion state on a 1-second tick via
+`sample_transport_congestion()`. `TransportDropState` tracks per-transport
+drop deltas: when new drops appear (rising edge), the `dropping` flag is
+set, and `detect_congestion()` in the forwarding path triggers CE marking
+on all forwarded datagrams.
+
+| Transport | Congestion Source | Mechanism |
+| --------- | ----------------- | --------- |
+| UDP | `SO_RXQ_OVFL` kernel drop counter | `recvmsg()` ancillary data on every packet |
+| TCP | Not yet implemented | Returns `None` (TCP handles congestion internally) |
+| Ethernet | Not yet implemented | Returns `None` |
+
 ### Transport Addresses
 
 Transport addresses (`TransportAddr`) are opaque byte vectors. The transport
@@ -542,7 +574,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 
 | Transport | Status | Notes |
 | --------- | ------ | ----- |
-| UDP/IP | **Implemented** | Primary transport, async send/receive, configurable MTU |
+| UDP/IP | **Implemented** | Primary transport, AsyncFd/recvmsg, SO_RXQ_OVFL kernel drop detection |
 | TCP/IP | **Implemented** | FMP header-based framing, connect-on-send, per-connection MSS MTU |
 | Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, beacon discovery, Linux only |
 | WiFi | Future direction | Infrastructure mode = Ethernet driver |

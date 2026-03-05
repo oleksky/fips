@@ -7,5 +7,5 @@ mod forwarding;
 mod handshake;
 mod mmp;
 mod rx_loop;
-mod session;
+pub(in crate::node) mod session;
 mod timeout;

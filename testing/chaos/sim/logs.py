@@ -26,6 +26,8 @@ class AnalysisResult:
     mmp_session_metrics: list[tuple[str, str]] = field(default_factory=list)
     handshake_timeouts: list[tuple[str, str]] = field(default_factory=list)
     panics: list[tuple[str, str]] = field(default_factory=list)
+    congestion_detected: list[tuple[str, str]] = field(default_factory=list)
+    kernel_drop_events: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [
@@ -41,6 +43,8 @@ class AnalysisResult:
             f"Handshake timeouts:    {len(self.handshake_timeouts)}",
             f"MMP link samples:      {len(self.mmp_link_metrics)}",
             f"MMP session samples:   {len(self.mmp_session_metrics)}",
+            f"Congestion events:     {len(self.congestion_detected)}",
+            f"Kernel drop events:    {len(self.kernel_drop_events)}",
         ]
 
         if self.panics:
@@ -134,6 +138,11 @@ def analyze_logs(logs: dict[str, str]) -> AnalysisResult:
                 result.mmp_link_metrics.append((container, line))
             if "MMP session metrics" in line:
                 result.mmp_session_metrics.append((container, line))
+            # Congestion events
+            if "Congestion detected" in line:
+                result.congestion_detected.append((container, line))
+            if "Kernel recv drops first observed" in line:
+                result.kernel_drop_events.append((container, line))
 
     return result
 

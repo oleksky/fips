@@ -8,6 +8,12 @@
 
 set -e
 
+# Enable TCP ECN negotiation for both IPv4 and IPv6 connections.
+# Despite the "ipv4" name, this sysctl controls ECN for all TCP.
+# Without this, IPv6 packets traversing the FIPS mesh carry ECN=0b00
+# (Not-ECT), and mark_ipv6_ecn_ce() is a no-op per RFC 3168.
+sysctl -w net.ipv4.tcp_ecn=1 >/dev/null 2>&1 || true
+
 # Start background services
 dnsmasq
 /usr/sbin/sshd

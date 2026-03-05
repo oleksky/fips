@@ -146,6 +146,6 @@ impl Node {
         peer.touch(packet.timestamp_ms);
 
         // Dispatch to link message handler (msg_type + payload, inner header stripped)
-        self.dispatch_link_message(&node_addr, link_message).await;
+        self.dispatch_link_message(&node_addr, link_message, ce_flag).await;
     }
 }

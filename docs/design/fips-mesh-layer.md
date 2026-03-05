@@ -465,12 +465,44 @@ MMP reports on different timers), inter-frame processing delays inflate spin
 bit RTT measurements unpredictably. Timestamp-echo from ReceiverReports
 (with dwell-time compensation) is the sole SRTT source.
 
-### CE Echo
+### ECN Congestion Signaling
 
-The CE (Congestion Experienced) echo flag (bit 1 in the FMP flags byte) is
-reserved for ECN signaling. The transport trait does not currently expose
-ECN marking, so the CE echo flag is never set. One-way delay trend serves
-as the sole pre-loss congestion indicator.
+The CE (Congestion Experienced) flag (bit 1 in the FMP flags byte) provides
+hop-by-hop congestion signaling through the mesh. Transit nodes detect
+congestion on outgoing links and set CE on forwarded packets; once set, the
+flag stays set for all subsequent hops to the destination.
+
+**Congestion detection** (`detect_congestion()`) triggers on any of:
+
+- Outgoing link MMP loss rate ≥ `node.ecn.loss_threshold` (default 5%)
+- Outgoing link MMP ETX ≥ `node.ecn.etx_threshold` (default 3.0)
+- Kernel receive buffer drops detected on any local transport (via
+  `SO_RXQ_OVFL` on UDP)
+
+**CE relay**: The forwarding path computes `outgoing_ce = incoming_ce ||
+local_congestion`. The `send_encrypted_link_message_with_ce()` method ORs
+`FLAG_CE` into the FMP header flags when ce is true. The original
+`send_encrypted_link_message()` delegates with `ce_flag=false`, leaving the
+20+ existing call sites unchanged.
+
+**IPv6 ECN-CE marking**: When a CE-flagged DataPacket arrives at its final
+destination, the IPv6 Traffic Class ECN bits are marked CE (0b11) before
+TUN delivery — but only for ECN-capable packets (ECT(0) or ECT(1)). Not-ECT
+packets are never marked per RFC 3168. The host TCP stack then echoes ECE in
+ACKs, triggering sender cwnd reduction through standard congestion control.
+
+**Session-layer tracking**: The `ecn_ce_count` field in MMP ReceiverReports
+tracks CE-flagged packets received per link, providing end-to-end visibility
+into congestion propagation.
+
+**Monitoring**: `CongestionStats` tracks four counters — `ce_forwarded`,
+`ce_received`, `congestion_detected`, and `kernel_drop_events` — exposed via
+`fipsctl show routing` (congestion block) and `fipstop` (routing tab).
+Rate-limited warn logging (5s interval) alerts on congestion detection events.
+
+See `node.ecn.*` in
+[fips-configuration.md](fips-configuration.md#ecn-signaling-nodeecn) for
+tuning parameters.
 
 ### Operator Logging
 
@@ -540,6 +572,7 @@ an attacker sends invalid packets to elicit responses.
 | Inner header timestamps | **Implemented** |
 | Path MTU tracking (SessionDatagram) | **Implemented** |
 | Metrics Measurement Protocol (MMP) | **Implemented** |
+| ECN congestion signaling (CE relay, IPv6 marking) | **Implemented** |
 | Rekey with index rotation | Planned |
 | Allowlist/blocklist | Planned |
 

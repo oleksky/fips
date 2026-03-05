@@ -78,7 +78,14 @@ fn draw_routing_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines = vec![
+    let cols = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ])
+    .split(inner);
+
+    // Left column: Forwarding + Discovery
+    let mut left = vec![
         helpers::section_header("Forwarding"),
         fwd_line(data, "Received", "received_packets", "received_bytes"),
         fwd_line(data, "Delivered", "delivered_packets", "delivered_bytes"),
@@ -109,17 +116,28 @@ fn draw_routing_stats(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
         helpers::kv_line("Identity Miss", &helpers::nested_u64(data, "discovery", "resp_identity_miss")),
         helpers::kv_line("Proof Failed", &helpers::nested_u64(data, "discovery", "resp_proof_failed")),
         helpers::kv_line("Decode Error", &helpers::nested_u64(data, "discovery", "resp_decode_error")),
-        Line::from(""),
+    ];
+
+    // Right column: Error Signals + Congestion
+    let mut right = vec![
         helpers::section_header("Error Signals"),
         helpers::kv_line("Coords Required", &helpers::nested_u64(data, "error_signals", "coords_required")),
         helpers::kv_line("Path Broken", &helpers::nested_u64(data, "error_signals", "path_broken")),
         helpers::kv_line("MTU Exceeded", &helpers::nested_u64(data, "error_signals", "mtu_exceeded")),
+        Line::from(""),
+        helpers::section_header("Congestion"),
+        helpers::kv_line("CE Forwarded", &helpers::nested_u64(data, "congestion", "ce_forwarded")),
+        helpers::kv_line("CE Received", &helpers::nested_u64(data, "congestion", "ce_received")),
+        helpers::kv_line("Congestion Detected", &helpers::nested_u64(data, "congestion", "congestion_detected")),
+        helpers::kv_line("Kernel Drops", &helpers::nested_u64(data, "congestion", "kernel_drop_events")),
     ];
 
-    let max_lines = inner.height as usize;
-    lines.truncate(max_lines);
+    let max_lines = cols[0].height as usize;
+    left.truncate(max_lines);
+    right.truncate(max_lines);
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(left), cols[0]);
+    frame.render_widget(Paragraph::new(right), cols[1]);
 }
 
 fn draw_coord_cache(frame: &mut Frame, app: &App, area: Rect) {

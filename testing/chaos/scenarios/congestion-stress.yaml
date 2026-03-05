@@ -1,0 +1,104 @@
+# Congestion Stress: exercise both MMP-based and kernel-drop congestion detection
+#
+# Topology: 10-node tree with all links bandwidth-limited to 1 Mbps
+# (egress HTB + ingress policing). Heavy iperf3 traffic (8 concurrent
+# sessions, 8 parallel streams) combined with 5-10% netem loss.
+#
+# Congestion detection signals exercised:
+#   1. MMP loss detection: netem loss exceeds the 5% loss_threshold,
+#      triggering detect_congestion() via MMP metrics on transit nodes.
+#   2. Kernel socket drops: small recv_buf_size (8KB) combined with
+#      traffic saturation causes SO_RXQ_OVFL on the UDP socket,
+#      triggering the transport drop detection path.
+#   3. Ingress policing: tc policer on the receive side drops excess
+#      inbound packets, creating bursty arrival patterns.
+#
+# ECN is explicitly enabled via fips_overrides.
+#
+# Success criteria (verified via post-run congestion snapshot):
+#   - congestion_detected > 0 on at least one forwarding node
+#   - kernel_drop_events > 0 on at least one node
+#   - ce_forwarded > 0 on transit nodes
+#   - ce_received > 0 on destination nodes
+#
+# Topology:
+#
+#         n01 (root)
+#        /    \
+#      n02    n03
+#     /   \   /  \
+#   n04  n05 n06  n07
+#    |    |
+#   n08  n09
+#    |
+#   n10
+
+scenario:
+  name: "congestion-stress"
+  seed: 7
+  duration_secs: 120
+
+topology:
+  algorithm: explicit
+  num_nodes: 10
+  params:
+    adjacency:
+      - [n01, n02]
+      - [n01, n03]
+      - [n02, n04]
+      - [n02, n05]
+      - [n03, n06]
+      - [n03, n07]
+      - [n04, n08]
+      - [n05, n09]
+      - [n08, n10]
+  subnet: "172.20.0.0/24"
+  ip_start: 10
+
+bandwidth:
+  enabled: true
+  tiers_mbps: [1]
+
+ingress:
+  enabled: true
+  tiers_kbps: [1000]
+  burst_bytes: 16000
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [2, 5]
+    jitter_ms: [0, 1]
+    loss_pct: [5, 10]
+  mutation:
+    interval_secs: {min: 9999, max: 9999}
+    fraction: 0.0
+    policies:
+      baseline:
+        delay_ms: [2, 5]
+        loss_pct: [5, 10]
+
+link_flaps:
+  enabled: false
+
+traffic:
+  enabled: true
+  max_concurrent: 8
+  interval_secs: {min: 2, max: 5}
+  duration_secs: {min: 30, max: 60}
+  parallel_streams: 8
+
+node_churn:
+  enabled: false
+
+logging:
+  rust_log: "info"
+  output_dir: "./sim-results"
+
+fips_overrides:
+  node:
+    ecn:
+      enabled: true
+  transports:
+    udp:
+      recv_buf_size: 4096

@@ -24,7 +24,7 @@ async fn test_forwarding_decode_error() {
     let mut node = make_node();
     let from = make_node_addr(0xAA);
     // Too-short payload: should log error and return without panic
-    node.handle_session_datagram(&from, &[0x00; 5]).await;
+    node.handle_session_datagram(&from, &[0x00; 5], false).await;
 }
 
 // --- TTL ---
@@ -39,7 +39,7 @@ async fn test_forwarding_hop_limit_exhausted() {
         .with_ttl(0);
     let encoded = dg.encode();
     // Dispatch with payload after msg_type byte
-    node.handle_session_datagram(&from, &encoded[1..]).await;
+    node.handle_session_datagram(&from, &encoded[1..], false).await;
     // No panic, no send (node has no peers)
 }
 
@@ -56,7 +56,7 @@ async fn test_forwarding_hop_limit_one_drops_at_transit() {
         .with_ttl(1);
     let encoded = dg.encode();
     // Should succeed — ttl=1 decrements to 0 but packet is still processed
-    node.handle_session_datagram(&from, &encoded[1..]).await;
+    node.handle_session_datagram(&from, &encoded[1..], false).await;
 }
 
 // --- Local delivery ---
@@ -69,7 +69,7 @@ async fn test_forwarding_local_delivery() {
     let dg = SessionDatagram::new(from, my_addr, vec![0x10, 0x00, 0x00, 0x00]);
     let encoded = dg.encode();
     // Should detect local delivery and return without forwarding
-    node.handle_session_datagram(&from, &encoded[1..]).await;
+    node.handle_session_datagram(&from, &encoded[1..], false).await;
 }
 
 // --- Direct peer forwarding ---
@@ -92,7 +92,7 @@ async fn test_forwarding_direct_peer() {
     // Handle on node 0: should forward to node 1 (direct peer)
     nodes[0]
         .node
-        .handle_session_datagram(&node0_addr, &encoded[1..])
+        .handle_session_datagram(&node0_addr, &encoded[1..], false)
         .await;
 
     // Process packets — node 1 should receive the forwarded datagram
@@ -135,7 +135,7 @@ async fn test_coord_cache_warming_session_setup() {
 
     // Handle the datagram (will be local delivery or no-route, but cache warming
     // happens before routing decision)
-    node.handle_session_datagram(&from, &encoded[1..]).await;
+    node.handle_session_datagram(&from, &encoded[1..], false).await;
 
     // After: both src and dest coords should be cached
     let cached_src = node.coord_cache().get(&src_addr, now_ms);
@@ -175,7 +175,7 @@ async fn test_coord_cache_warming_session_ack() {
     assert!(node.coord_cache().get(&src_addr, now_ms).is_none());
     assert!(node.coord_cache().get(&dest_addr, now_ms).is_none());
 
-    node.handle_session_datagram(&from, &encoded[1..]).await;
+    node.handle_session_datagram(&from, &encoded[1..], false).await;
 
     // SessionAck caches both src_coords and dest_coords
     let cached_src = node.coord_cache().get(&src_addr, now_ms);
@@ -217,7 +217,7 @@ async fn test_coord_cache_warming_encrypted_msg_with_coords() {
     assert!(node.coord_cache().get(&src_addr, now_ms).is_none());
     assert!(node.coord_cache().get(&dest_addr, now_ms).is_none());
 
-    node.handle_session_datagram(&from, &encoded[1..]).await;
+    node.handle_session_datagram(&from, &encoded[1..], false).await;
 
     assert!(
         node.coord_cache().get(&src_addr, now_ms).is_some(),
@@ -250,7 +250,7 @@ async fn test_coord_cache_warming_encrypted_msg_no_coords() {
         .unwrap()
         .as_millis() as u64;
 
-    node.handle_session_datagram(&from, &encoded[1..]).await;
+    node.handle_session_datagram(&from, &encoded[1..], false).await;
 
     assert!(
         node.coord_cache().get(&src_addr, now_ms).is_none(),
@@ -566,4 +566,203 @@ async fn test_forwarding_with_cache_warming_enables_routing() {
     );
 
     cleanup_nodes(&mut nodes).await;
+}
+
+// ============================================================================
+// ECN Tests
+// ============================================================================
+
+use crate::node::handlers::session::mark_ipv6_ecn_ce;
+use crate::node::TransportDropState;
+use crate::transport::TransportId;
+
+/// Build a minimal IPv6 header (40 bytes) with specified ECN bits.
+fn make_ipv6_packet_with_ecn(ecn: u8) -> Vec<u8> {
+    let mut pkt = vec![0u8; 40];
+    let tc = ecn; // DSCP=0, ECN=ecn
+    pkt[0] = 0x60 | (tc >> 4);
+    pkt[1] = tc << 4;
+    pkt
+}
+
+/// Extract ECN bits from an IPv6 packet.
+fn read_ecn(pkt: &[u8]) -> u8 {
+    let tc = ((pkt[0] & 0x0F) << 4) | (pkt[1] >> 4);
+    tc & 0x03
+}
+
+#[test]
+fn test_mark_ecn_ce_on_ect0() {
+    let mut pkt = make_ipv6_packet_with_ecn(0b10);
+    assert_eq!(read_ecn(&pkt), 0b10);
+    mark_ipv6_ecn_ce(&mut pkt);
+    assert_eq!(read_ecn(&pkt), 0b11);
+}
+
+#[test]
+fn test_mark_ecn_ce_on_ect1() {
+    let mut pkt = make_ipv6_packet_with_ecn(0b01);
+    assert_eq!(read_ecn(&pkt), 0b01);
+    mark_ipv6_ecn_ce(&mut pkt);
+    assert_eq!(read_ecn(&pkt), 0b11);
+}
+
+#[test]
+fn test_mark_ecn_ce_on_not_ect() {
+    let mut pkt = make_ipv6_packet_with_ecn(0b00);
+    mark_ipv6_ecn_ce(&mut pkt);
+    assert_eq!(read_ecn(&pkt), 0b00);
+}
+
+#[test]
+fn test_mark_ecn_ce_already_ce() {
+    let mut pkt = make_ipv6_packet_with_ecn(0b11);
+    mark_ipv6_ecn_ce(&mut pkt);
+    assert_eq!(read_ecn(&pkt), 0b11);
+}
+
+#[test]
+fn test_mark_ecn_ce_preserves_dscp_and_flow_label() {
+    let mut pkt = vec![0u8; 40];
+    // DSCP=0b101100 (46=EF), ECN=ECT(0)=0b10 → TC=0xB2
+    let tc: u8 = 0xB2;
+    pkt[0] = 0x60 | (tc >> 4); // 0x6B
+    pkt[1] = (tc << 4) | 0x0A; // 0x2A (flow label high nibble = 0xA)
+    pkt[2] = 0xBC;
+    pkt[3] = 0xDE;
+
+    mark_ipv6_ecn_ce(&mut pkt);
+
+    let new_tc = ((pkt[0] & 0x0F) << 4) | (pkt[1] >> 4);
+    assert_eq!(new_tc, 0xB3, "TC should be 0xB3 (DSCP preserved, ECN=CE)");
+    assert_eq!(pkt[0] >> 4, 6, "Version nibble preserved");
+    assert_eq!(pkt[1] & 0x0F, 0x0A, "Flow label high nibble preserved");
+    assert_eq!(pkt[2], 0xBC, "Flow label byte 2 preserved");
+    assert_eq!(pkt[3], 0xDE, "Flow label byte 3 preserved");
+}
+
+#[test]
+fn test_mark_ecn_ce_short_packet() {
+    let mut pkt = vec![0x60];
+    mark_ipv6_ecn_ce(&mut pkt);
+    assert_eq!(pkt, vec![0x60]);
+
+    let mut empty: Vec<u8> = vec![];
+    mark_ipv6_ecn_ce(&mut empty);
+    assert!(empty.is_empty());
+}
+
+#[tokio::test]
+async fn test_ce_relay_through_forwarding() {
+    // 3-node chain: 0 -- 1 -- 2
+    // Send a datagram with CE set from node 0 to node 1.
+    // Node 1 should relay CE to node 2.
+    let edges = vec![(0, 1), (1, 2)];
+    let mut nodes = run_tree_test(3, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+    let node2_addr = *nodes[2].node.node_addr();
+
+    // Record ecn_ce_count at node 2 before
+    let ce_before = nodes[2]
+        .node
+        .get_peer(&node1_addr)
+        .and_then(|p| p.mmp())
+        .map(|m| m.receiver.ecn_ce_count())
+        .unwrap_or(0);
+
+    // Build a SessionDatagram from node 0 to node 2
+    let dg = SessionDatagram::new(
+        node0_addr,
+        node2_addr,
+        vec![0x10, 0x00, 0x04, 0x00, 1, 2, 3, 4],
+    );
+    let encoded = dg.encode();
+
+    // Send from node 0 to node 1 with CE flag set
+    nodes[0]
+        .node
+        .send_encrypted_link_message_with_ce(&node1_addr, &encoded, true)
+        .await
+        .unwrap();
+
+    // Process: node 1 receives (CE set), forwards to node 2 (CE relayed)
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    // Node 2's link-layer MMP should have received a CE-flagged frame from node 1
+    let ce_after = nodes[2]
+        .node
+        .get_peer(&node1_addr)
+        .and_then(|p| p.mmp())
+        .map(|m| m.receiver.ecn_ce_count())
+        .unwrap_or(0);
+
+    assert!(
+        ce_after > ce_before,
+        "Node 2 should see CE flag relayed from node 1 (before={ce_before}, after={ce_after})"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[test]
+fn test_detect_congestion_with_transport_drops() {
+    let mut node = make_node();
+
+    // No drops — detect_congestion should return false for any address
+    let fake_addr = NodeAddr::from_bytes([1; 16]);
+    assert!(!node.detect_congestion(&fake_addr));
+
+    // Simulate transport kernel drops
+    let tid = TransportId::new(1);
+    node.transport_drops.insert(tid, TransportDropState {
+        prev_drops: 100,
+        dropping: true,
+    });
+
+    // Now detect_congestion should return true (local transport congestion)
+    assert!(node.detect_congestion(&fake_addr));
+
+    // Clear the dropping flag — should return false again
+    node.transport_drops.get_mut(&tid).unwrap().dropping = false;
+    assert!(!node.detect_congestion(&fake_addr));
+}
+
+#[test]
+fn test_detect_congestion_disabled_ecn() {
+    let mut node = make_node();
+    node.config.node.ecn.enabled = false;
+
+    // Even with transport drops, disabled ECN should return false
+    let tid = TransportId::new(1);
+    node.transport_drops.insert(tid, TransportDropState {
+        prev_drops: 50,
+        dropping: true,
+    });
+
+    let fake_addr = NodeAddr::from_bytes([1; 16]);
+    assert!(!node.detect_congestion(&fake_addr));
+}
+
+#[test]
+fn test_sample_transport_congestion() {
+    let mut node = make_node();
+
+    // Insert a transport drop state with a baseline
+    let tid = TransportId::new(1);
+    node.transport_drops.insert(tid, TransportDropState {
+        prev_drops: 0,
+        dropping: false,
+    });
+
+    // No transports registered — sample_transport_congestion is a no-op
+    // (transport_drops entry stays unchanged)
+    node.sample_transport_congestion();
+    assert!(!node.transport_drops[&tid].dropping);
 }

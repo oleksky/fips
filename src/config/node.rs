@@ -415,6 +415,50 @@ impl BuffersConfig {
 }
 
 // ============================================================================
+// ECN Congestion Signaling
+// ============================================================================
+
+/// ECN congestion signaling configuration (`node.ecn.*`).
+///
+/// Controls the FMP CE relay chain: transit nodes detect congestion on outgoing
+/// links and set the CE flag in forwarded datagrams. The destination marks
+/// IPv6 ECN-CE on ECN-capable packets before TUN delivery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EcnConfig {
+    /// Enable ECN congestion signaling (`node.ecn.enabled`).
+    #[serde(default = "EcnConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Loss rate threshold for marking CE (`node.ecn.loss_threshold`).
+    /// When the outgoing link's loss rate meets or exceeds this value,
+    /// the transit node sets CE on forwarded datagrams.
+    #[serde(default = "EcnConfig::default_loss_threshold")]
+    pub loss_threshold: f64,
+
+    /// ETX threshold for marking CE (`node.ecn.etx_threshold`).
+    /// When the outgoing link's ETX meets or exceeds this value,
+    /// the transit node sets CE on forwarded datagrams.
+    #[serde(default = "EcnConfig::default_etx_threshold")]
+    pub etx_threshold: f64,
+}
+
+impl Default for EcnConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            loss_threshold: 0.05,
+            etx_threshold: 3.0,
+        }
+    }
+}
+
+impl EcnConfig {
+    fn default_enabled() -> bool { true }
+    fn default_loss_threshold() -> f64 { 0.05 }
+    fn default_etx_threshold() -> f64 { 3.0 }
+}
+
+// ============================================================================
 // Node Configuration (Root)
 // ============================================================================
 
@@ -493,6 +537,10 @@ pub struct NodeConfig {
     /// Metrics Measurement Protocol — session layer (`node.session_mmp.*`).
     #[serde(default)]
     pub session_mmp: SessionMmpConfig,
+
+    /// ECN congestion signaling (`node.ecn.*`).
+    #[serde(default)]
+    pub ecn: EcnConfig,
 }
 
 impl Default for NodeConfig {
@@ -516,6 +564,7 @@ impl Default for NodeConfig {
             control: ControlConfig::default(),
             mmp: MmpConfig::default(),
             session_mmp: SessionMmpConfig::default(),
+            ecn: EcnConfig::default(),
         }
     }
 }
@@ -525,4 +574,36 @@ impl NodeConfig {
     fn default_base_rtt_ms() -> u64 { 100 }
     fn default_heartbeat_interval_secs() -> u64 { 10 }
     fn default_link_dead_timeout_secs() -> u64 { 30 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ecn_config_defaults() {
+        let c = EcnConfig::default();
+        assert!(c.enabled);
+        assert!((c.loss_threshold - 0.05).abs() < 1e-9);
+        assert!((c.etx_threshold - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_ecn_config_yaml_roundtrip() {
+        let yaml = "loss_threshold: 0.10\netx_threshold: 2.5\nenabled: false\n";
+        let c: EcnConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!c.enabled);
+        assert!((c.loss_threshold - 0.10).abs() < 1e-9);
+        assert!((c.etx_threshold - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_ecn_config_partial_yaml() {
+        // Only specify loss_threshold — others should get defaults
+        let yaml = "loss_threshold: 0.02\n";
+        let c: EcnConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(c.enabled); // default
+        assert!((c.loss_threshold - 0.02).abs() < 1e-9);
+        assert!((c.etx_threshold - 3.0).abs() < 1e-9); // default
+    }
 }

@@ -792,6 +792,21 @@ pub trait Transport {
 }
 
 // ============================================================================
+// Transport Congestion
+// ============================================================================
+
+/// Transport-local congestion indicators.
+///
+/// All fields are optional — transports report what they can.
+/// Consumers compute deltas from cumulative counters.
+#[derive(Clone, Debug, Default)]
+pub struct TransportCongestion {
+    /// Cumulative packets dropped by kernel/OS before reaching the application.
+    /// Monotonically increasing since transport start.
+    pub recv_drops: Option<u64>,
+}
+
+// ============================================================================
 // Transport Handle
 // ============================================================================
 
@@ -969,6 +984,20 @@ impl TransportHandle {
     /// Check if transport is operational.
     pub fn is_operational(&self) -> bool {
         self.state().is_operational()
+    }
+
+    /// Query transport-local congestion indicators.
+    ///
+    /// Returns a snapshot of congestion signals that the transport can
+    /// observe locally (e.g., kernel receive buffer drops). Fields are
+    /// `None` when the transport doesn't support that signal.
+    pub fn congestion(&self) -> TransportCongestion {
+        match self {
+            TransportHandle::Udp(t) => t.congestion(),
+            #[cfg(target_os = "linux")]
+            TransportHandle::Ethernet(_) => TransportCongestion::default(),
+            TransportHandle::Tcp(_) => TransportCongestion::default(),
+        }
     }
 
     /// Get transport-specific stats as a JSON value.

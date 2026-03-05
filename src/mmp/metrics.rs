@@ -188,6 +188,11 @@ impl MmpMetrics {
     pub fn goodput_bps(&self) -> f64 {
         self.goodput_bps
     }
+
+    /// Cumulative ECN CE count from the most recent ReceiverReport.
+    pub fn last_ecn_ce_count(&self) -> u32 {
+        self.prev_rr_ecn_ce
+    }
 }
 
 impl Default for MmpMetrics {

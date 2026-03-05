@@ -8,6 +8,13 @@ u32 filters match destination IP to direct traffic to the right class.
     ├── class 1:1  → netem 11: (peer 1) ← u32 filter: dst=<peer1_ip>
     ├── class 1:2  → netem 12: (peer 2) ← u32 filter: dst=<peer2_ip>
     └── class 1:99 → pfifo (default, no impairment)
+
+Optional ingress policing adds rate-based packet dropping on the
+receive side via tc ingress qdisc + policer filters:
+
+    eth0 ingress (ffff:)
+    ├── u32 filter: src=<peer1_ip> → police rate <R>kbit burst <B> drop
+    └── u32 filter: src=<peer2_ip> → police rate <R>kbit burst <B> drop
 """
 
 from __future__ import annotations
@@ -17,7 +24,7 @@ import random
 from dataclasses import dataclass, field
 
 from .docker_exec import docker_exec_quiet, is_container_running
-from .scenario import BandwidthConfig, LinkPolicyOverride, NetemConfig, NetemPolicy
+from .scenario import BandwidthConfig, IngressConfig, LinkPolicyOverride, NetemConfig, NetemPolicy
 from .topology import SimTopology, veth_interface_name
 
 log = logging.getLogger(__name__)
@@ -65,6 +72,9 @@ class LinkNetemState:
     netem_handle: str  # e.g., "11:"
     params: NetemParams = field(default_factory=NetemParams)
     rate_mbit: int = 0  # 0 = unlimited (1gbit default)
+    ingress_rate_kbps: int = 0  # 0 = no ingress policing
+    ingress_burst_bytes: int = 32000
+    ingress_filter_prio: int = 0  # u32 filter priority for this peer
 
 
 @dataclass
@@ -85,6 +95,7 @@ class NetemManager:
         config: NetemConfig,
         rng: random.Random,
         bandwidth: BandwidthConfig | None = None,
+        ingress: IngressConfig | None = None,
     ):
         self.topology = topology
         self.config = config
@@ -102,6 +113,14 @@ class NetemManager:
                 rate = rng.choice(bandwidth.tiers_mbps)
                 self._edge_rates[(a, b)] = rate
                 self._edge_rates[(b, a)] = rate
+        # Per-edge ingress policing: (node_a, node_b) -> rate in kbps
+        self._ingress_config = ingress
+        self._ingress_rates: dict[tuple[str, str], int] = {}
+        if ingress and ingress.enabled:
+            for a, b in topology.edges:
+                rate = rng.choice(ingress.tiers_kbps)
+                self._ingress_rates[(a, b)] = rate
+                self._ingress_rates[(b, a)] = rate
         # Per-edge policy overrides: canonical "nXX-nYY" -> NetemPolicy
         # Build a set of canonical edge strings for validation
         topo_edge_strs = {"-".join(sorted([a, b])) for a, b in topology.edges}
@@ -194,6 +213,9 @@ class NetemManager:
                         f"prio {idx} u32 match ip dst {dest_ip}/32 flowid {class_id}"
                     )
 
+                    ingress_rate = self._ingress_rates.get((node_id, peer_id), 0)
+                    ingress_burst = self._ingress_config.burst_bytes if self._ingress_config else 32000
+
                     state = LinkNetemState(
                         container=container,
                         dest_ip=dest_ip,
@@ -201,16 +223,33 @@ class NetemManager:
                         netem_handle=netem_handle,
                         params=params,
                         rate_mbit=rate_mbit,
+                        ingress_rate_kbps=ingress_rate,
+                        ingress_burst_bytes=ingress_burst,
+                        ingress_filter_prio=idx,
                     )
                     container_states[dest_ip] = state
+
+                # Ingress policing: add ingress qdisc + per-peer policer filters
+                if self._ingress_rates:
+                    cmds.append(f"tc qdisc add dev {IFACE} ingress 2>/dev/null || true")
+                    for idx, (peer_id, dest_ip) in enumerate(ip_peers.items(), start=1):
+                        ingress_rate = self._ingress_rates.get((node_id, peer_id), 0)
+                        if ingress_rate > 0:
+                            ingress_burst = self._ingress_config.burst_bytes if self._ingress_config else 32000
+                            cmds.append(
+                                f"tc filter add dev {IFACE} parent ffff: protocol ip "
+                                f"prio {idx} u32 match ip src {dest_ip}/32 "
+                                f"police rate {ingress_rate}kbit burst {ingress_burst} drop"
+                            )
 
                 full_cmd = " && ".join(cmds)
                 result = docker_exec_quiet(container, full_cmd, timeout=30)
                 if result is not None:
                     log.info(
-                        "Configured per-link netem on %s (%d IP peers)",
+                        "Configured per-link netem on %s (%d IP peers%s)",
                         container,
                         len(ip_peers),
+                        ", ingress policing" if self._ingress_rates else "",
                     )
                 else:
                     log.warning("Failed to configure netem on %s", container)
@@ -282,13 +321,27 @@ class NetemManager:
                     f"prio {prio} u32 match ip dst {dest_ip}/32 flowid {state.class_id}"
                 )
 
+            # Re-apply ingress policing
+            has_ingress = any(s.ingress_rate_kbps > 0 for s in container_states.values())
+            if has_ingress:
+                cmds.append(f"tc qdisc add dev {IFACE} ingress 2>/dev/null || true")
+                for dest_ip, state in container_states.items():
+                    if state.ingress_rate_kbps > 0:
+                        cmds.append(
+                            f"tc filter add dev {IFACE} parent ffff: protocol ip "
+                            f"prio {state.ingress_filter_prio} u32 match ip src {dest_ip}/32 "
+                            f"police rate {state.ingress_rate_kbps}kbit "
+                            f"burst {state.ingress_burst_bytes} drop"
+                        )
+
             full_cmd = " && ".join(cmds)
             result = docker_exec_quiet(container, full_cmd, timeout=30)
             if result is not None:
                 log.info(
-                    "Re-applied IP netem on %s (%d peers)",
+                    "Re-applied IP netem on %s (%d peers%s)",
                     container,
                     len(container_states),
+                    ", ingress policing" if has_ingress else "",
                 )
             else:
                 log.warning("Failed to re-apply IP netem on %s", container)

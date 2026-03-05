@@ -12,7 +12,7 @@ import time
 
 from .compose import generate_compose
 from .config_gen import write_configs
-from .control import snapshot_all_mmp, snapshot_all_trees
+from .control import snapshot_all_congestion, snapshot_all_mmp, snapshot_all_trees
 from .docker_exec import docker_compose
 from .links import LinkManager
 from .logs import AnalysisResult, analyze_logs, collect_logs, write_sim_metadata
@@ -140,7 +140,8 @@ class SimRunner:
         # 7. Initialize managers
         if s.netem.enabled:
             bw = s.bandwidth if s.bandwidth.enabled else None
-            self.netem_mgr = NetemManager(self.topology, s.netem, self.rng, bandwidth=bw)
+            ig = s.ingress if s.ingress.enabled else None
+            self.netem_mgr = NetemManager(self.topology, s.netem, self.rng, bandwidth=bw, ingress=ig)
             self.netem_mgr.down_nodes = self._down_nodes
             log.info("Applying initial per-link netem...")
             self.netem_mgr.setup_initial()
@@ -254,6 +255,15 @@ class SimRunner:
                 log.info("Restoring stopped nodes...")
                 self.node_mgr.restore_all()
 
+            # Collect iperf3 throughput results before containers stop
+            if self.traffic_mgr:
+                iperf_results = self.traffic_mgr.collect_results()
+                if iperf_results:
+                    iperf_path = os.path.join(self.output_dir, "iperf3-results.json")
+                    with open(iperf_path, "w") as f:
+                        json.dump(iperf_results, f, indent=2)
+                    log.info("Saved %d iperf3 results to %s", len(iperf_results), iperf_path)
+
             # Take final tree snapshot while nodes are still running
             self._take_snapshot("final")
 
@@ -298,26 +308,32 @@ class SimRunner:
         return result
 
     def _take_snapshot(self, label: str):
-        """Query all nodes via control socket and save tree/MMP snapshots."""
+        """Query all nodes via control socket and save tree/MMP/congestion snapshots."""
         if not self.topology:
             return
         log.info("Taking %s snapshot...", label)
         tree_snap = snapshot_all_trees(self.topology)
         mmp_snap = snapshot_all_mmp(self.topology)
+        congestion_snap = snapshot_all_congestion(self.topology)
 
         tree_path = os.path.join(self.output_dir, f"tree-snapshot-{label}.json")
         mmp_path = os.path.join(self.output_dir, f"mmp-snapshot-{label}.json")
+        congestion_path = os.path.join(self.output_dir, f"congestion-snapshot-{label}.json")
         os.makedirs(self.output_dir, exist_ok=True)
         with open(tree_path, "w") as f:
             json.dump(tree_snap, f, indent=2)
         with open(mmp_path, "w") as f:
             json.dump(mmp_snap, f, indent=2)
+        with open(congestion_path, "w") as f:
+            json.dump(congestion_snap, f, indent=2)
         log.info(
-            "Snapshot %s: %d/%d tree, %d/%d mmp responses",
+            "Snapshot %s: %d/%d tree, %d/%d mmp, %d/%d congestion responses",
             label,
             len(tree_snap),
             len(self.topology.nodes),
             len(mmp_snap),
+            len(self.topology.nodes),
+            len(congestion_snap),
             len(self.topology.nodes),
         )
 

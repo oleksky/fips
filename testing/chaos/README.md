@@ -105,6 +105,51 @@ Explicit topologies exercising non-UDP transports.
   static peer config. Netem mutation (30% fraction, every 20-40s) and link
   flaps (1 link max, 10-20s down).
 
+### Congestion and ECN
+
+Scenarios testing ECN congestion signaling and transport-level congestion
+detection.
+
+| Scenario           | Nodes | Topology | Duration | What it tests                                              |
+| ------------------ | ----- | -------- | -------- | ---------------------------------------------------------- |
+| congestion-stress  | 10    | Tree     | 120s     | CE marking under kernel drops and MMP loss detection       |
+| ecn-ab-on / ecn-ab-off | 6 | Tree     | 120s     | A/B throughput comparison: ECN enabled vs disabled          |
+
+- **congestion-stress**: 10-node tree with 1 Mbps egress bandwidth caps,
+  5-10% netem loss, and heavy iperf3 traffic. Ingress policing (1000 kbps)
+  and small `recv_buf_size` (4 KB) trigger both MMP loss detection and
+  `SO_RXQ_OVFL` kernel socket drops. Validates end-to-end CE propagation:
+  transit nodes detect congestion, set CE flag, destinations receive
+  CE-marked packets, `ecn_ce_count` reported in MMP.
+- **ecn-ab-on / ecn-ab-off**: Paired scenarios with identical conditions
+  (6-node tree, 10 Mbps egress, 1000 kbps ingress policing, 10ms link
+  delay, 8 KB recv buffer) differing only in `ecn.enabled`.
+  `ecn-ab-test.sh` runs both and compares throughput and congestion
+  counters. Initial results: +10.2% recv throughput with ECN enabled.
+
+### Ingress Traffic Control
+
+Scenarios can include `ingress` configuration to simulate upstream bandwidth
+bottlenecks using tc ingress policing:
+
+```yaml
+ingress:
+  enabled: true
+  tiers_kbps: [1000]         # per-peer rate limit in kbps
+  burst_bytes: 10000         # policer burst allowance
+```
+
+Per-peer u32 filters on the ingress qdisc (`parent ffff:`) rate-limit
+inbound packets. Combined with small `recv_buf_size`, this reliably triggers
+`SO_RXQ_OVFL` kernel socket drops for congestion detection testing.
+
+### iperf3 JSON Capture
+
+Traffic sessions capture iperf3 results using `--json` output. Results are
+collected per-session from containers and saved as `iperf3-results.json` in
+the scenario output directory, enabling automated throughput analysis across
+scenario runs.
+
 ## CLI Options
 
 | Option            | Description                          |

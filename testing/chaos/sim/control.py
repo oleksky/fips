@@ -101,3 +101,42 @@ def snapshot_all_mmp(topology: SimTopology) -> dict[str, dict]:
         else:
             log.warning("No MMP data from %s", node_id)
     return result
+
+
+def query_routing(container: str) -> dict | None:
+    """Query a node's routing stats (includes congestion counters)."""
+    return query_node(container, "show_routing")
+
+
+def query_transports(container: str) -> dict | None:
+    """Query a node's transport state (includes kernel drop counters)."""
+    return query_node(container, "show_transports")
+
+
+def snapshot_all_congestion(topology: SimTopology) -> dict[str, dict]:
+    """Query show_routing on all nodes to capture congestion counters.
+
+    Returns {node_id: {"congestion": {...}, "kernel_drops": [...]}}.
+    Nodes that fail to respond are omitted from the result.
+    """
+    result = {}
+    for node_id in sorted(topology.nodes):
+        container = topology.container_name(node_id)
+        routing = query_routing(container)
+        transports = query_transports(container)
+        if routing is not None:
+            entry = {"congestion": routing.get("congestion", {})}
+            if transports is not None:
+                drops = []
+                for t in transports.get("transports", []):
+                    stats = t.get("stats", {})
+                    drops.append({
+                        "transport_id": t.get("transport_id"),
+                        "name": t.get("name"),
+                        "kernel_drops": stats.get("kernel_drops"),
+                    })
+                entry["kernel_drops"] = drops
+            result[node_id] = entry
+        else:
+            log.warning("No routing data from %s", node_id)
+    return result

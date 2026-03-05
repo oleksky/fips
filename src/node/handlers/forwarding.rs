@@ -14,14 +14,15 @@ use crate::protocol::{
     CoordsRequired, MtuExceeded, PathBroken, SessionAck, SessionDatagram, SessionSetup,
 };
 use crate::NodeAddr;
-use tracing::debug;
+use std::time::{Duration, Instant};
+use tracing::{debug, warn};
 
 impl Node {
     /// Handle an incoming SessionDatagram from a peer.
     ///
     /// Called by `dispatch_link_message` for msg_type 0x00. The payload
     /// has already had its msg_type byte stripped by dispatch.
-    pub(in crate::node) async fn handle_session_datagram(&mut self, _from: &NodeAddr, payload: &[u8]) {
+    pub(in crate::node) async fn handle_session_datagram(&mut self, _from: &NodeAddr, payload: &[u8], incoming_ce: bool) {
         self.stats_mut().forwarding.record_received(payload.len());
 
         let mut datagram = match SessionDatagram::decode(payload) {
@@ -50,7 +51,7 @@ impl Node {
         // Local delivery: dispatch to session layer handlers
         if datagram.dest_addr == *self.node_addr() {
             self.stats_mut().forwarding.record_delivered(payload.len());
-            self.handle_session_payload(&datagram.src_addr, &datagram.payload, datagram.path_mtu)
+            self.handle_session_payload(&datagram.src_addr, &datagram.payload, datagram.path_mtu, incoming_ce)
                 .await;
             return;
         }
@@ -77,10 +78,25 @@ impl Node {
             }
         }
 
+        // ECN CE relay: propagate incoming CE and detect local congestion
+        let local_congestion = self.detect_congestion(&next_hop_addr);
+        let outgoing_ce = incoming_ce || local_congestion;
+        if local_congestion {
+            self.stats_mut().congestion.record_congestion_detected();
+            let now = Instant::now();
+            let should_log = self.last_congestion_log
+                .map(|t| now.duration_since(t) >= Duration::from_secs(5))
+                .unwrap_or(true);
+            if should_log {
+                self.last_congestion_log = Some(now);
+                warn!(next_hop = %next_hop_addr, "Congestion detected, CE flag set on forwarded packet");
+            }
+        }
+
         // Forward: re-encode (includes 0x00 type byte) and send
         let encoded = datagram.encode();
         if let Err(e) = self
-            .send_encrypted_link_message(&next_hop_addr, &encoded)
+            .send_encrypted_link_message_with_ce(&next_hop_addr, &encoded, outgoing_ce)
             .await
         {
             match e {
@@ -100,6 +116,9 @@ impl Node {
             }
         } else {
             self.stats_mut().forwarding.record_forwarded(encoded.len());
+            if outgoing_ce {
+                self.stats_mut().congestion.record_ce_forwarded();
+            }
         }
     }
 
@@ -334,6 +353,57 @@ impl Node {
                 bottleneck_mtu,
                 "Sent MtuExceeded error signal"
             );
+        }
+    }
+
+    /// Detect congestion for CE marking on forwarded datagrams.
+    ///
+    /// Checks two signal sources:
+    /// 1. Outgoing link MMP metrics (loss rate, ETX) against configured thresholds
+    /// 2. Local transport congestion (kernel drops on any transport)
+    ///
+    /// Returns `true` if any signal indicates congestion.
+    pub(in crate::node) fn detect_congestion(&self, next_hop: &NodeAddr) -> bool {
+        if !self.config.node.ecn.enabled {
+            return false;
+        }
+        // Outgoing link MMP metrics
+        if let Some(peer) = self.peers.get(next_hop)
+            && let Some(mmp) = peer.mmp()
+        {
+            let metrics = &mmp.metrics;
+            if metrics.loss_rate() >= self.config.node.ecn.loss_threshold
+                || metrics.etx >= self.config.node.ecn.etx_threshold
+            {
+                return true;
+            }
+        }
+        // Local transport congestion (kernel drops)
+        self.transport_drops.values().any(|s| s.dropping)
+    }
+
+    /// Sample transport congestion indicators.
+    ///
+    /// Called from the tick handler (1s interval). For each transport,
+    /// queries the cumulative kernel drop counter and sets the `dropping`
+    /// flag if new drops occurred since the previous sample.
+    pub(in crate::node) fn sample_transport_congestion(&mut self) {
+        let mut new_drop_events = Vec::new();
+        for (&tid, transport) in &self.transports {
+            let congestion = transport.congestion();
+            let state = self.transport_drops.entry(tid).or_default();
+            if let Some(current) = congestion.recv_drops {
+                let new_drops = current > state.prev_drops;
+                if new_drops && !state.dropping {
+                    new_drop_events.push(tid);
+                }
+                state.dropping = new_drops;
+                state.prev_drops = current;
+            }
+        }
+        for tid in new_drop_events {
+            self.stats_mut().congestion.record_kernel_drop_event();
+            warn!(transport_id = tid.as_u32(), "Kernel recv drops first observed on transport");
         }
     }
 }

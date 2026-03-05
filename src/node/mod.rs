@@ -35,7 +35,7 @@ use crate::transport::ethernet::EthernetTransport;
 use crate::tree::TreeState;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
-use self::wire::{build_encrypted, build_established_header, prepend_inner_header, FLAG_SP};
+use self::wire::{build_encrypted, build_established_header, prepend_inner_header, FLAG_CE, FLAG_SP};
 use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity};
 use rand::Rng;
 use std::collections::{HashMap, VecDeque};
@@ -194,6 +194,18 @@ impl RecentRequest {
 /// Key for addr_to_link reverse lookup.
 type AddrKey = (TransportId, TransportAddr);
 
+/// Per-transport kernel drop tracking for congestion detection.
+///
+/// Sampled every tick (1s). The `dropping` flag indicates whether new
+/// kernel drops were observed since the previous sample.
+#[derive(Debug, Default)]
+struct TransportDropState {
+    /// Previous `recv_drops` sample (cumulative counter).
+    prev_drops: u64,
+    /// True if drops increased since the last sample.
+    dropping: bool,
+}
+
 /// A running FIPS node instance.
 ///
 /// This is the top-level container holding all node state.
@@ -248,6 +260,8 @@ pub struct Node {
     // === Transports & Links ===
     /// Active transports (owned by Node).
     transports: HashMap<TransportId, TransportHandle>,
+    /// Per-transport kernel drop tracking for congestion detection.
+    transport_drops: HashMap<TransportId, TransportDropState>,
     /// Active links.
     links: HashMap<LinkId, Link>,
     /// Reverse lookup: (transport_id, remote_addr) -> link_id.
@@ -358,6 +372,10 @@ pub struct Node {
     /// Timestamp of last periodic parent re-evaluation (for pacing).
     last_parent_reeval: Option<std::time::Instant>,
 
+    // === Congestion Logging ===
+    /// Timestamp of last congestion detection log (rate-limited to 5s).
+    last_congestion_log: Option<std::time::Instant>,
+
     // === Display Names ===
     /// Human-readable names for configured peers (alias or short npub).
     /// Populated at startup from peer config.
@@ -427,6 +445,7 @@ impl Node {
             coord_cache,
             recent_requests: HashMap::new(),
             transports: HashMap::new(),
+            transport_drops: HashMap::new(),
             links: HashMap::new(),
             addr_to_link: HashMap::new(),
             packet_tx: None,
@@ -462,6 +481,7 @@ impl Node {
             ),
             retry_pending: HashMap::new(),
             last_parent_reeval: None,
+            last_congestion_log: None,
             peer_aliases: HashMap::new(),
         })
     }
@@ -522,6 +542,7 @@ impl Node {
             coord_cache,
             recent_requests: HashMap::new(),
             transports: HashMap::new(),
+            transport_drops: HashMap::new(),
             links: HashMap::new(),
             addr_to_link: HashMap::new(),
             packet_tx: None,
@@ -557,6 +578,7 @@ impl Node {
             ),
             retry_pending: HashMap::new(),
             last_parent_reeval: None,
+            last_congestion_log: None,
             peer_aliases: HashMap::new(),
         }
     }
@@ -1289,6 +1311,18 @@ impl Node {
         node_addr: &NodeAddr,
         plaintext: &[u8],
     ) -> Result<(), NodeError> {
+        self.send_encrypted_link_message_with_ce(node_addr, plaintext, false).await
+    }
+
+    /// Like `send_encrypted_link_message` but allows setting the FMP CE flag.
+    ///
+    /// Used by the forwarding path to relay congestion signals hop-by-hop.
+    pub(super) async fn send_encrypted_link_message_with_ce(
+        &mut self,
+        node_addr: &NodeAddr,
+        plaintext: &[u8],
+        ce_flag: bool,
+    ) -> Result<(), NodeError> {
         let peer = self.peers.get_mut(node_addr)
             .ok_or(NodeError::PeerNotFound(*node_addr))?;
 
@@ -1312,7 +1346,10 @@ impl Node {
         let sp_flag = peer.mmp()
             .map(|mmp| mmp.spin_bit.tx_bit())
             .unwrap_or(false);
-        let flags = if sp_flag { FLAG_SP } else { 0 };
+        let mut flags = if sp_flag { FLAG_SP } else { 0 };
+        if ce_flag {
+            flags |= FLAG_CE;
+        }
 
         let session = peer.noise_session_mut().ok_or_else(|| NodeError::SendFailed {
             node_addr: *node_addr,

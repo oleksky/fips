@@ -163,6 +163,25 @@ Controls tree construction and parent selection.
 Bloom filter size (1 KB), hash count (5), and size classes are protocol
 constants and not configurable.
 
+### ECN Signaling (`node.ecn.*`)
+
+Controls hop-by-hop ECN (Explicit Congestion Notification) signaling. When
+enabled, transit nodes detect congestion on outgoing links (via MMP loss/ETX
+metrics or kernel buffer drops) and set the CE flag on forwarded FMP frames.
+Destination nodes mark ECN-capable IPv6 packets with CE before TUN delivery
+per RFC 3168, enabling end-host TCP congestion control to react.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.ecn.enabled` | bool | `true` | Enable ECN congestion signaling (CE flag relay and local congestion detection) |
+| `node.ecn.loss_threshold` | f64 | `0.05` | MMP loss rate threshold for CE marking (0.0–1.0). When the outgoing link's loss rate meets or exceeds this value, forwarded packets are CE-marked. |
+| `node.ecn.etx_threshold` | f64 | `3.0` | MMP ETX threshold for CE marking (≥1.0). When the outgoing link's ETX meets or exceeds this value, forwarded packets are CE-marked. |
+
+Congestion detection triggers on any of: outgoing link loss ≥ `loss_threshold`,
+outgoing link ETX ≥ `etx_threshold`, or kernel receive buffer drops detected on
+any local transport. CE is relayed hop-by-hop: once set on any hop, the flag
+stays set for all subsequent hops to the destination.
+
 ### Session / Data Plane (`node.session.*`)
 
 Controls end-to-end session behavior and packet queuing.
@@ -478,6 +497,10 @@ node:
     mode: full                       # full | lightweight | minimal
     log_interval_secs: 30
     owd_window_size: 32
+  ecn:
+    enabled: true                    # ECN congestion signaling (CE flag relay)
+    loss_threshold: 0.05             # MMP loss rate threshold for CE marking (5%)
+    etx_threshold: 3.0               # MMP ETX threshold for CE marking
   control:
     enabled: true
     socket_path: null                # null = auto ($XDG_RUNTIME_DIR → /run/fips → /tmp fallback)

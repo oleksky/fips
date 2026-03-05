@@ -6,13 +6,13 @@ use super::{
     DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr, TransportError,
     TransportId, TransportState, TransportType,
 };
+mod socket;
 mod stats;
+use socket::{AsyncUdpSocket, UdpRawSocket};
 use stats::UdpStats;
 use crate::config::UdpConfig;
-use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 
@@ -31,7 +31,7 @@ pub struct UdpTransport {
     /// Current state.
     state: TransportState,
     /// Bound socket (None until started).
-    socket: Option<Arc<UdpSocket>>,
+    socket: Option<AsyncUdpSocket>,
     /// Channel for delivering received packets to Node.
     packet_tx: PacketTx,
     /// Receive loop task handle.
@@ -73,14 +73,16 @@ impl UdpTransport {
         self.local_addr
     }
 
-    /// Get a reference to the socket (only valid after start).
-    pub fn socket(&self) -> Option<&Arc<UdpSocket>> {
-        self.socket.as_ref()
-    }
-
     /// Get the transport statistics.
     pub fn stats(&self) -> &Arc<UdpStats> {
         &self.stats
+    }
+
+    /// Query transport-local congestion indicators.
+    pub fn congestion(&self) -> super::TransportCongestion {
+        super::TransportCongestion {
+            recv_drops: Some(self.stats.kernel_drops.load(std::sync::atomic::Ordering::Relaxed)),
+        }
     }
 
     /// Start the transport asynchronously.
@@ -100,56 +102,20 @@ impl UdpTransport {
             .parse()
             .map_err(|e| TransportError::StartFailed(format!("invalid bind address: {}", e)))?;
 
-        // Create socket via socket2 for buffer size control
-        let domain = if bind_addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
-        let sock2 = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
-            .map_err(|e| TransportError::StartFailed(format!("socket create failed: {}", e)))?;
-        sock2.set_nonblocking(true)
-            .map_err(|e| TransportError::StartFailed(format!("set nonblocking failed: {}", e)))?;
-        sock2.bind(&bind_addr.into())
-            .map_err(|e| TransportError::StartFailed(format!("bind failed: {}", e)))?;
+        // Create, bind, and configure UDP socket
+        let raw_socket = UdpRawSocket::open(
+            bind_addr,
+            self.config.recv_buf_size(),
+            self.config.send_buf_size(),
+        )?;
 
-        // Set socket buffer sizes
-        let recv_buf = self.config.recv_buf_size();
-        let send_buf = self.config.send_buf_size();
-        sock2.set_recv_buffer_size(recv_buf)
-            .map_err(|e| TransportError::StartFailed(format!("set recv buffer: {}", e)))?;
-        sock2.set_send_buffer_size(send_buf)
-            .map_err(|e| TransportError::StartFailed(format!("set send buffer: {}", e)))?;
+        let actual_recv = raw_socket.recv_buffer_size()?;
+        let actual_send = raw_socket.send_buffer_size()?;
+        self.local_addr = Some(raw_socket.local_addr());
 
-        let actual_recv = sock2.recv_buffer_size()
-            .map_err(|e| TransportError::StartFailed(format!("get recv buffer: {}", e)))?;
-        let actual_send = sock2.send_buffer_size()
-            .map_err(|e| TransportError::StartFailed(format!("get send buffer: {}", e)))?;
-
-        if actual_recv < recv_buf {
-            warn!(
-                requested = recv_buf,
-                actual = actual_recv,
-                "UDP recv buffer clamped by kernel (increase net.core.rmem_max)"
-            );
-        }
-        if actual_send < send_buf {
-            warn!(
-                requested = send_buf,
-                actual = actual_send,
-                "UDP send buffer clamped by kernel (increase net.core.wmem_max)"
-            );
-        }
-
-        // Convert to tokio UdpSocket
-        let std_socket: std::net::UdpSocket = sock2.into();
-        let socket = UdpSocket::from_std(std_socket)
-            .map_err(|e| TransportError::StartFailed(format!("tokio socket failed: {}", e)))?;
-
-        self.local_addr = Some(
-            socket
-                .local_addr()
-                .map_err(|e| TransportError::StartFailed(format!("get local addr: {}", e)))?,
-        );
-
-        let socket = Arc::new(socket);
-        self.socket = Some(socket.clone());
+        // Wrap in AsyncFd for tokio integration
+        let async_socket = raw_socket.into_async()?;
+        self.socket = Some(async_socket.clone());
 
         // Spawn receive loop
         let transport_id = self.transport_id;
@@ -158,7 +124,7 @@ impl UdpTransport {
         let stats = self.stats.clone();
 
         let recv_task = tokio::spawn(async move {
-            udp_receive_loop(socket, transport_id, packet_tx, mtu, stats).await;
+            udp_receive_loop(async_socket, transport_id, packet_tx, mtu, stats).await;
         });
 
         self.recv_task = Some(recv_task);
@@ -231,7 +197,7 @@ impl UdpTransport {
         let socket_addr = parse_socket_addr(addr)?;
         let socket = self.socket.as_ref().ok_or(TransportError::NotStarted)?;
 
-        match socket.send_to(data, socket_addr).await {
+        match socket.send_to(data, &socket_addr).await {
             Ok(bytes_sent) => {
                 self.stats.record_send(bytes_sent);
                 trace!(
@@ -244,7 +210,7 @@ impl UdpTransport {
             }
             Err(e) => {
                 self.stats.record_send_error();
-                Err(TransportError::SendFailed(format!("{}", e)))
+                Err(e)
             }
         }
     }
@@ -305,7 +271,7 @@ fn parse_socket_addr(addr: &TransportAddr) -> Result<SocketAddr, TransportError>
 
 /// UDP receive loop - runs as a spawned task.
 async fn udp_receive_loop(
-    socket: Arc<UdpSocket>,
+    socket: AsyncUdpSocket,
     transport_id: TransportId,
     packet_tx: PacketTx,
     mtu: u16,
@@ -318,8 +284,9 @@ async fn udp_receive_loop(
 
     loop {
         match socket.recv_from(&mut buf).await {
-            Ok((len, remote_addr)) => {
+            Ok((len, remote_addr, kernel_drops)) => {
                 stats.record_recv(len);
+                stats.set_kernel_drops(kernel_drops as u64);
 
                 let data = buf[..len].to_vec();
                 let addr = TransportAddr::from_string(&remote_addr.to_string());
@@ -572,5 +539,15 @@ mod tests {
 
         let binary = TransportAddr::new(vec![0xff, 0x80]);
         assert!(parse_socket_addr(&binary).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_congestion_reports_kernel_drops() {
+        let (tx, _rx) = packet_channel(100);
+        let transport = UdpTransport::new(TransportId::new(1), None, make_config(0), tx);
+
+        // Before start, congestion should still report (from stats)
+        let cong = transport.congestion();
+        assert_eq!(cong.recv_drops, Some(0));
     }
 }

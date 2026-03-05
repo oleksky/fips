@@ -245,6 +245,46 @@ impl ErrorSignalStats {
     }
 }
 
+/// Congestion event statistics — ECN CE tracking and detection triggers.
+#[derive(Default)]
+pub struct CongestionStats {
+    /// Packets forwarded with the CE flag set (incoming CE or locally detected).
+    pub ce_forwarded: u64,
+    /// CE-flagged packets received at this node as final destination.
+    pub ce_received: u64,
+    /// Number of times detect_congestion() returned true.
+    pub congestion_detected: u64,
+    /// Rising-edge transport kernel drop events (not-dropping → dropping).
+    pub kernel_drop_events: u64,
+}
+
+impl CongestionStats {
+    pub fn record_ce_forwarded(&mut self) {
+        self.ce_forwarded += 1;
+    }
+
+    pub fn record_ce_received(&mut self) {
+        self.ce_received += 1;
+    }
+
+    pub fn record_congestion_detected(&mut self) {
+        self.congestion_detected += 1;
+    }
+
+    pub fn record_kernel_drop_event(&mut self) {
+        self.kernel_drop_events += 1;
+    }
+
+    pub fn snapshot(&self) -> CongestionStatsSnapshot {
+        CongestionStatsSnapshot {
+            ce_forwarded: self.ce_forwarded,
+            ce_received: self.ce_received,
+            congestion_detected: self.congestion_detected,
+            kernel_drop_events: self.kernel_drop_events,
+        }
+    }
+}
+
 /// Aggregate node statistics.
 #[derive(Default)]
 pub struct NodeStats {
@@ -253,6 +293,7 @@ pub struct NodeStats {
     pub tree: TreeStats,
     pub bloom: BloomStats,
     pub errors: ErrorSignalStats,
+    pub congestion: CongestionStats,
 }
 
 impl NodeStats {
@@ -267,6 +308,7 @@ impl NodeStats {
             tree: self.tree.snapshot(),
             bloom: self.bloom.snapshot(),
             errors: self.errors.snapshot(),
+            congestion: self.congestion.snapshot(),
         }
     }
 }
@@ -357,10 +399,19 @@ pub struct ErrorSignalStatsSnapshot {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
+pub struct CongestionStatsSnapshot {
+    pub ce_forwarded: u64,
+    pub ce_received: u64,
+    pub congestion_detected: u64,
+    pub kernel_drop_events: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct NodeStatsSnapshot {
     pub forwarding: ForwardingStatsSnapshot,
     pub discovery: DiscoveryStatsSnapshot,
     pub tree: TreeStatsSnapshot,
     pub bloom: BloomStatsSnapshot,
     pub errors: ErrorSignalStatsSnapshot,
+    pub congestion: CongestionStatsSnapshot,
 }

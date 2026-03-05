@@ -121,6 +121,22 @@ class BandwidthConfig:
 
 
 @dataclass
+class IngressConfig:
+    """Per-link ingress policing via tc ingress qdisc + policer.
+
+    When enabled, each link gets an ingress policer that drops inbound
+    packets exceeding the configured rate. Unlike egress HTB (which
+    paces packets smoothly), the policer drops excess packets at the
+    kernel level, creating bursty arrival patterns that can overflow
+    small socket buffers and trigger SO_RXQ_OVFL kernel drops.
+    """
+
+    enabled: bool = False
+    tiers_kbps: list[int] = field(default_factory=lambda: [1000])
+    burst_bytes: int = 32000
+
+
+@dataclass
 class LoggingConfig:
     rust_log: str = "info"
     output_dir: str = "./sim-results"
@@ -137,6 +153,7 @@ class Scenario:
     traffic: TrafficConfig = field(default_factory=TrafficConfig)
     node_churn: NodeChurnConfig = field(default_factory=NodeChurnConfig)
     bandwidth: BandwidthConfig = field(default_factory=BandwidthConfig)
+    ingress: IngressConfig = field(default_factory=IngressConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     # Raw YAML dict appended to each generated FIPS node config.
     # Allows scenarios to override any FIPS config parameter
@@ -271,6 +288,16 @@ def load_scenario(path: str) -> Scenario:
             raise ValueError("bandwidth.tiers_mbps must be a non-empty list")
         s.bandwidth.tiers_mbps = [int(t) for t in tiers]
 
+    # Ingress section
+    ig = raw.get("ingress", {})
+    s.ingress.enabled = ig.get("enabled", False)
+    if "tiers_kbps" in ig:
+        tiers = ig["tiers_kbps"]
+        if not isinstance(tiers, list) or not tiers:
+            raise ValueError("ingress.tiers_kbps must be a non-empty list")
+        s.ingress.tiers_kbps = [int(t) for t in tiers]
+    s.ingress.burst_bytes = int(ig.get("burst_bytes", 32000))
+
     # Logging section
     lg = raw.get("logging", {})
     s.logging.rust_log = lg.get("rust_log", "info")
@@ -376,3 +403,9 @@ def _validate(s: Scenario):
         for tier in s.bandwidth.tiers_mbps:
             if tier <= 0:
                 raise ValueError(f"bandwidth.tiers_mbps: all values must be > 0, got {tier}")
+    if s.ingress.enabled:
+        for tier in s.ingress.tiers_kbps:
+            if tier <= 0:
+                raise ValueError(f"ingress.tiers_kbps: all values must be > 0, got {tier}")
+        if s.ingress.burst_bytes <= 0:
+            raise ValueError(f"ingress.burst_bytes must be > 0, got {s.ingress.burst_bytes}")

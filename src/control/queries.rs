@@ -119,10 +119,10 @@ pub fn show_peers(node: &Node) -> Value {
             if let Some(smoothed_etx) = mmp.metrics.smoothed_etx() {
                 mmp_json["smoothed_etx"] = json!(smoothed_etx);
             }
-            if let Some(srtt) = mmp.metrics.srtt_ms() {
-                if let Some(setx) = mmp.metrics.smoothed_etx() {
-                    mmp_json["lqi"] = json!(setx * (1.0 + srtt / 100.0));
-                }
+            if let Some(srtt) = mmp.metrics.srtt_ms()
+                && let Some(setx) = mmp.metrics.smoothed_etx()
+            {
+                mmp_json["lqi"] = json!(setx * (1.0 + srtt / 100.0));
             }
             peer_json["mmp"] = mmp_json;
         }
@@ -265,10 +265,10 @@ pub fn show_sessions(node: &Node) -> Value {
             if let Some(smoothed_etx) = mmp.metrics.smoothed_etx() {
                 mmp_json["smoothed_etx"] = json!(smoothed_etx);
             }
-            if let Some(srtt) = mmp.metrics.srtt_ms() {
-                if let Some(setx) = mmp.metrics.smoothed_etx() {
-                    mmp_json["sqi"] = json!(setx * (1.0 + srtt / 100.0));
-                }
+            if let Some(srtt) = mmp.metrics.srtt_ms()
+                && let Some(setx) = mmp.metrics.smoothed_etx()
+            {
+                mmp_json["sqi"] = json!(setx * (1.0 + srtt / 100.0));
             }
             session_json["mmp"] = mmp_json;
         }
@@ -362,6 +362,7 @@ pub fn show_mmp(node: &Node) -> Value {
 
         link_layer["delivery_ratio_forward"] = json!(metrics.delivery_ratio_forward);
         link_layer["delivery_ratio_reverse"] = json!(metrics.delivery_ratio_reverse);
+        link_layer["ecn_ce_count"] = json!(metrics.last_ecn_ce_count());
 
         Some(json!({
             "peer": hex::encode(addr.as_bytes()),
@@ -487,6 +488,7 @@ pub fn show_routing(node: &Node) -> Value {
         "forwarding": serde_json::to_value(&node_stats.forwarding).unwrap_or_default(),
         "discovery": serde_json::to_value(&node_stats.discovery).unwrap_or_default(),
         "error_signals": serde_json::to_value(&node_stats.errors).unwrap_or_default(),
+        "congestion": serde_json::to_value(&node_stats.congestion).unwrap_or_default(),
     })
 }
 

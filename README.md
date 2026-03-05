@@ -40,6 +40,8 @@ sessions across the mesh.
   unmodified IP applications
 - **Metrics Measurement Protocol** — per-link RTT, loss, jitter, and goodput
   measurement
+- **ECN congestion signaling** — hop-by-hop CE flag relay with RFC 3168 IPv6
+  marking, transport kernel drop detection
 - **Operator visibility** — `fipsctl` control socket interface for runtime
   inspection of peers, links, sessions, tree state, and metrics
 - **Zero configuration** — sensible defaults; a node can start with no config
@@ -187,13 +189,15 @@ UDP/IP overlays but has not been tested beyond small meshes.
 - Noise IK (link layer) and Noise XK (session layer) encryption
 - IPv6 TUN adapter with DNS resolution of `.fips` names
 - Per-link metrics (RTT, loss, jitter, goodput)
-- Runtime inspection via `fipsctl`
+- ECN congestion signaling (hop-by-hop CE relay, IPv6 CE marking, kernel drop detection)
+- UDP, TCP, and Ethernet transports
+- Runtime inspection via `fipsctl` and `fipstop`
 - Docker-based integration and chaos testing
 
 ### Near-term priorities
 
 - Peer discovery via Nostr relays (bootstrap without static peer lists)
-- Additional transports (Ethernet, Tor)
+- Additional transports (Bluetooth, Tor)
 - Improved routing resilience under churn
 - Security audit of cryptographic protocols
 - CI pipeline and published crate
