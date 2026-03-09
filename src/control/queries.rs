@@ -65,9 +65,19 @@ pub fn show_status(node: &Node) -> Value {
 
 /// `show_peers` — Authenticated peers.
 pub fn show_peers(node: &Node) -> Value {
+    let tree = node.tree_state();
+    let my_addr = *tree.my_node_addr();
+    let parent_id = *tree.my_declaration().parent_id();
+    let is_root = tree.is_root();
+
     let peers: Vec<Value> = node.peers().map(|peer| {
         let node_addr = *peer.node_addr();
         let addr_hex = hex::encode(node_addr.as_bytes());
+
+        // Determine tree relationship
+        let is_parent = !is_root && node_addr == parent_id;
+        let is_child = tree.peer_declaration(&node_addr)
+            .is_some_and(|decl| *decl.parent_id() == my_addr);
 
         let mut peer_json = json!({
             "node_addr": addr_hex,
@@ -81,11 +91,23 @@ pub fn show_peers(node: &Node) -> Value {
             "has_tree_position": peer.has_tree_position(),
             "has_bloom_filter": peer.filter_sequence() > 0,
             "filter_sequence": peer.filter_sequence(),
+            "is_parent": is_parent,
+            "is_child": is_child,
         });
 
         // Add transport address if available
         if let Some(addr) = peer.current_addr() {
             peer_json["transport_addr"] = json!(format!("{}", addr));
+        }
+
+        // Add link info (direction, transport type)
+        let link_id = peer.link_id();
+        if let Some(link) = node.get_link(&link_id) {
+            peer_json["direction"] = json!(format!("{}", link.direction()));
+            let transport_id = link.transport_id();
+            if let Some(handle) = node.get_transport(&transport_id) {
+                peer_json["transport_type"] = json!(handle.transport_type().name);
+            }
         }
 
         // Add tree depth if available

@@ -1,7 +1,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table};
 
 use crate::app::{App, Tab};
@@ -9,7 +9,7 @@ use crate::app::{App, Tab};
 use super::helpers;
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
-    let peers = get_peers(app);
+    let peers = get_peers_sorted(app);
     let row_count = peers.len();
 
     if app.detail_view.is_some() {
@@ -27,24 +27,39 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn get_peers(app: &App) -> Vec<serde_json::Value> {
-    app.data
+/// Get peers sorted by LQI ascending (best first). Peers without LQI sort last.
+fn get_peers_sorted(app: &App) -> Vec<serde_json::Value> {
+    let mut peers = app.data
         .get(&Tab::Peers)
         .and_then(|v| v.get("peers"))
         .and_then(|v| v.as_array())
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    peers.sort_by(|a, b| {
+        let lqi_a = a.get("mmp").and_then(|m| m.get("lqi")).and_then(|v| v.as_f64());
+        let lqi_b = b.get("mmp").and_then(|m| m.get("lqi")).and_then(|v| v.as_f64());
+        match (lqi_a, lqi_b) {
+            (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+
+    peers
 }
 
 fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, peers: &[serde_json::Value], row_count: usize) {
     let header = Row::new(vec![
         Cell::from("Name"),
-        Cell::from("Address"),
-        Cell::from("Conn"),
-        Cell::from("Depth"),
+        Cell::from("Npub"),
+        Cell::from("Transport"),
+        Cell::from("Dir"),
         Cell::from("SRTT"),
         Cell::from("Loss"),
         Cell::from("LQI"),
+        Cell::from("Goodput"),
         Cell::from("Pkts Tx"),
         Cell::from("Pkts Rx"),
     ])
@@ -58,43 +73,73 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, peers: &[serde_json:
         .iter()
         .map(|peer| {
             let name = helpers::str_field(peer, "display_name");
-            let addr = helpers::truncate_hex(helpers::str_field(peer, "ipv6_addr"), 10);
-            let conn = helpers::str_field(peer, "connectivity");
-            let depth = peer
-                .get("tree_depth")
-                .and_then(|v| v.as_u64())
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "-".into());
+            let npub = helpers::str_field(peer, "npub");
+            let is_parent = peer.get("is_parent").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_child = peer.get("is_child").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            // Transport: "type addr" (e.g., "udp 1.2.3.4:2121")
+            let transport = {
+                let t_type = peer.get("transport_type").and_then(|v| v.as_str()).unwrap_or("");
+                let t_addr = peer.get("transport_addr").and_then(|v| v.as_str()).unwrap_or("");
+                if t_type.is_empty() && t_addr.is_empty() {
+                    "-".to_string()
+                } else if t_type.is_empty() {
+                    t_addr.to_string()
+                } else if t_addr.is_empty() {
+                    t_type.to_string()
+                } else {
+                    format!("{t_type}/{t_addr}")
+                }
+            };
+
+            let dir = peer.get("direction").and_then(|v| v.as_str()).map(|d| match d {
+                "inbound" => "in",
+                "outbound" => "out",
+                other => other,
+            }).unwrap_or("-");
             let srtt = helpers::nested_f64(peer, "mmp", "srtt_ms", 1);
             let loss = helpers::nested_f64_prefer(peer, "mmp", "smoothed_loss", "loss_rate", 3);
             let lqi = helpers::nested_f64(peer, "mmp", "lqi", 2);
+            let goodput = helpers::nested_throughput(peer, "mmp", "goodput_bps");
             let pkts_tx = helpers::nested_u64(peer, "stats", "packets_sent");
             let pkts_rx = helpers::nested_u64(peer, "stats", "packets_recv");
 
+            // Tree role colorization
+            let row_style = if is_parent {
+                Style::default().fg(Color::Magenta)
+            } else if is_child {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+
             Row::new(vec![
                 Cell::from(name.to_string()),
-                Cell::from(addr),
-                Cell::from(connectivity_styled(conn)),
-                Cell::from(depth),
+                Cell::from(npub.to_string()),
+                Cell::from(transport),
+                Cell::from(dir.to_string()),
                 Cell::from(srtt),
                 Cell::from(loss),
                 Cell::from(lqi),
+                Cell::from(goodput),
                 Cell::from(pkts_tx),
                 Cell::from(pkts_rx),
             ])
+            .style(row_style)
         })
         .collect();
 
     let widths = [
-        Constraint::Min(12),
-        Constraint::Length(13),
-        Constraint::Length(8),
-        Constraint::Length(5),
-        Constraint::Length(8),
-        Constraint::Length(7),
-        Constraint::Length(6),
-        Constraint::Length(9),
-        Constraint::Length(9),
+        Constraint::Min(12),      // Name
+        Constraint::Length(67),    // Npub (full bech32)
+        Constraint::Min(20),      // Transport
+        Constraint::Length(4),     // Dir
+        Constraint::Length(8),     // SRTT
+        Constraint::Length(7),     // Loss
+        Constraint::Length(6),     // LQI
+        Constraint::Length(10),    // Goodput
+        Constraint::Length(9),     // Pkts Tx
+        Constraint::Length(9),     // Pkts Rx
     ];
 
     let table = Table::new(rows, widths)
@@ -146,6 +191,16 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, peers: &[serde_json::Va
 
     let has_tree = peer.get("has_tree_position").and_then(|v| v.as_bool()).unwrap_or(false);
     let has_bloom = peer.get("has_bloom_filter").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_parent = peer.get("is_parent").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_child = peer.get("is_child").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let tree_role = if is_parent {
+        "parent"
+    } else if is_child {
+        "child"
+    } else {
+        "peer"
+    };
 
     let mut lines: Vec<Line> = vec![
         // Identity
@@ -154,20 +209,24 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, peers: &[serde_json::Va
         helpers::kv_line("Node Addr", helpers::str_field(peer, "node_addr")),
         helpers::kv_line("Npub", helpers::str_field(peer, "npub")),
         helpers::kv_line("IPv6 Addr", helpers::str_field(peer, "ipv6_addr")),
+        helpers::kv_line("Tree Role", tree_role),
         Line::from(""),
         // Connection
         helpers::section_header("Connection"),
         helpers::kv_line("Connectivity", helpers::str_field(peer, "connectivity")),
         helpers::kv_line("Link ID", &helpers::u64_field(peer, "link_id")),
+        helpers::kv_line("Direction", peer.get("direction").and_then(|v| v.as_str()).unwrap_or("-")),
     ];
     if let Some(addr) = peer.get("transport_addr").and_then(|v| v.as_str()) {
         lines.push(helpers::kv_line("Transport Addr", addr));
+    }
+    if let Some(t_type) = peer.get("transport_type").and_then(|v| v.as_str()) {
+        lines.push(helpers::kv_line("Transport Type", t_type));
     }
     // Link details (cross-referenced)
     let link_id = peer.get("link_id").and_then(|v| v.as_u64());
     let link = lookup_link(app, link_id);
     if let Some(ref link) = link {
-        lines.push(helpers::kv_line("Direction", helpers::str_field(link, "direction")));
         lines.push(helpers::kv_line("Link State", helpers::str_field(link, "state")));
     }
     lines.extend([
@@ -180,7 +239,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, peers: &[serde_json::Va
         Line::from(""),
     ]);
 
-    // Transport info (cross-referenced from link → transport)
+    // Transport info (cross-referenced from link -> transport)
     if let Some(transport) = link.as_ref().and_then(|l| lookup_transport(app, l)) {
         lines.push(helpers::section_header("Transport"));
         lines.push(helpers::kv_line("Type", helpers::str_field(&transport, "type")));
@@ -250,7 +309,7 @@ fn lookup_link(app: &App, link_id: Option<u64>) -> Option<serde_json::Value> {
         .cloned()
 }
 
-/// Look up transport info by chaining: link → transport_id → transport.
+/// Look up transport info by chaining: link -> transport_id -> transport.
 fn lookup_transport(app: &App, link: &serde_json::Value) -> Option<serde_json::Value> {
     let transport_id = link.get("transport_id").and_then(|v| v.as_u64())?;
     let transports = app.data.get(&Tab::Transports)?;
@@ -260,14 +319,5 @@ fn lookup_transport(app: &App, link: &serde_json::Value) -> Option<serde_json::V
         .iter()
         .find(|t| t.get("transport_id").and_then(|v| v.as_u64()) == Some(transport_id))
         .cloned()
-}
-
-fn connectivity_styled(conn: &str) -> Span<'static> {
-    let color = match conn {
-        "Full" => Color::Green,
-        "Partial" => Color::Yellow,
-        _ => Color::Red,
-    };
-    Span::styled(conn.to_string(), Style::default().fg(color))
 }
 
