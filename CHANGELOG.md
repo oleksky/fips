@@ -14,15 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docker sidecar deployment for containerized services
 - Comprehensive node and transport statistics via control socket
 - fipstop TUI monitoring tool with smoothed metrics and quality indices
+- fipstop peers display: transport type, direction, and tree roles
+- Estimated mesh size from bloom filter cardinality
 - ECN congestion signaling and transport congestion detection
 - Persistent identity with key file management (`fipsctl keygen`)
 - Periodic Noise rekey with fresh DH for forward secrecy (FMP + FSP)
 - Host-to-npub static mapping: resolve `hostname.fips` via host map
   populated from peer config aliases and `/etc/fips/hosts` file
 - DNS responder auto-reloads hosts file on modification (no restart needed)
+- Debian/Ubuntu `.deb` packaging via cargo-deb
 - Systemd service packaging with tarball installer
 - Build version metadata: git commit hash, dirty flag, and target triple
   embedded in all binaries via `--version`
+- Local CI runner script (`testing/ci-local.sh`)
+- TCP transport node-level integration tests
+- CI: expanded integration matrix, nextest JUnit reporting, workflow_dispatch
 - CHANGELOG.md following Keep a Changelog format
 
 ### Fixed
@@ -32,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ethernet AEAD decryption failures caused by minimum-frame padding
 - Link-dead detection skipping peers that never send data
 - FMP version check added to TCP stream reader
+- Control socket path mismatch between daemon and clients
+- fips-dns.service pulling in systemd-resolved and hanging on missing fips0
 
 ### Changed
 

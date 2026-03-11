@@ -573,7 +573,7 @@ an attacker sends invalid packets to elicit responses.
 | Path MTU tracking (SessionDatagram) | **Implemented** |
 | Metrics Measurement Protocol (MMP) | **Implemented** |
 | ECN congestion signaling (CE relay, IPv6 marking) | **Implemented** |
-| Rekey with index rotation | Planned |
+| Rekey with index rotation | **Implemented** |
 | Allowlist/blocklist | Planned |
 
 ## References

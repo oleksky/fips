@@ -272,16 +272,20 @@ EtherType 0x2121. SOCK_DGRAM mode
 lets the kernel handle Ethernet header construction and parsing — the
 transport deals only with payloads and MAC addresses.
 
-A 1-byte frame type prefix disambiguates data frames (0x00) from discovery
-beacons (0x01) on the receive path. This costs one byte of MTU but allows
-beacons and data to share the same EtherType and socket.
+Data frames use a 3-byte header: a 1-byte frame type (`0x00`) followed by
+a 2-byte little-endian payload length. The length field allows the receiver
+to trim Ethernet minimum-frame padding that would otherwise corrupt AEAD
+verification. Beacon frames (`0x01`) use only the 1-byte type prefix
+(fixed 34-byte payload). Beacons and data share the same EtherType and
+socket.
 
 | Property | Value |
 | -------- | ----- |
 | EtherType | 0x2121 |
 | Socket type | AF_PACKET SOCK_DGRAM |
-| Frame type prefix | 0x00 = data, 0x01 = beacon |
-| Effective MTU | Interface MTU - 1 (typically 1499) |
+| Data frame header | `[type:1][length:2 LE][payload]` |
+| Beacon frame header | `[type:1][payload]` (fixed 34 bytes) |
+| Effective MTU | Interface MTU - 3 (typically 1497) |
 | Addressing | 6-byte MAC address |
 | Platform | Linux only (`CAP_NET_RAW` required) |
 
@@ -396,7 +400,7 @@ removes it from the pool and aborts its receive task.
 ```yaml
 transports:
   tcp:
-    bind_addr: "0.0.0.0:443"       # Listen address (omit for outbound-only)
+    bind_addr: "0.0.0.0:8443"      # Listen address (omit for outbound-only)
     mtu: 1400                       # Default MTU
     connect_timeout_ms: 5000        # Outbound connect timeout
     nodelay: true                   # TCP_NODELAY (disable Nagle)

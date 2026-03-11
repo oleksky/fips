@@ -96,7 +96,7 @@ Explicit topologies exercising non-UDP transports.
   via beacons, not static config. Minimal netem (1-5ms delay).
 - **ethernet-mesh**: Mirrors `tcp-mesh` topology but with Ethernet instead of
   TCP. UDP edges use static config; Ethernet edges use beacon discovery.
-- **tcp-only**: 4-node ring using TCP on port 443. Tests connect-on-send,
+- **tcp-only**: 4-node ring using TCP on port 8443. Tests connect-on-send,
   FMP framing over TCP, and reconnection. Netem enabled (1-10ms delay, 0-1%
   loss).
 - **tcp-chain**: 4-node linear chain, all TCP. Tests multi-hop routing over

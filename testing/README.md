@@ -17,16 +17,18 @@ configurations.
 | mesh        | 5     | UDP       | Sparse mesh, 6 links, multi-hop  |
 | chain       | 5     | UDP       | Linear chain, max 4-hop paths    |
 | mesh-public | 5+1   | UDP       | Mesh with external public node   |
-| tcp-chain   | 3     | TCP       | Linear chain over TCP (port 443) |
+| tcp-chain   | 3     | TCP       | Linear chain over TCP (port 8443) |
+| rekey       | 5     | UDP       | Rekey integration test topology  |
 
 ### [chaos/](chaos/) -- Stochastic Simulation
 
 Automated network testing with configurable node counts, topology
 algorithms (random geometric, Erdos-Renyi, chain, explicit), and fault
 injection (netem mutation, link flaps, traffic generation, node
-churn). 16 scenarios covering general stress testing, cost-based parent
-selection, mixed link technologies (fiber/Bluetooth/WiFi), and
-transport-specific validation (UDP, TCP, Ethernet). Scenarios are
+churn). 20 scenarios covering general stress testing, cost-based parent
+selection, mixed link technologies (fiber/Bluetooth/WiFi),
+transport-specific validation (UDP, TCP, Ethernet), and ECN/congestion
+testing. Scenarios are
 defined in YAML and executed via a Python harness that manages the full
 lifecycle: topology generation, Docker orchestration, fault scheduling,
 log collection, and analysis.

@@ -194,6 +194,20 @@ outgoing link ETX ≥ `etx_threshold`, or kernel receive buffer drops detected o
 any local transport. CE is relayed hop-by-hop: once set on any hop, the flag
 stays set for all subsequent hops to the destination.
 
+### Rekey (`node.rekey.*`)
+
+Controls periodic Noise rekey for forward secrecy. When enabled, both FMP
+(link-layer IK) and FSP (session-layer XK) sessions perform fresh Diffie-Hellman
+key exchanges after a time or message count threshold, whichever comes first.
+A 10-second drain window keeps the old session active for decryption during
+cutover.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.rekey.enabled` | bool | `true` | Enable periodic Noise rekey on all links and sessions |
+| `node.rekey.after_secs` | u64 | `120` | Initiate rekey after this many seconds on a session |
+| `node.rekey.after_messages` | u64 | `65536` | Initiate rekey after this many messages sent on a session |
+
 ### Session / Data Plane (`node.session.*`)
 
 Controls end-to-end session behavior and packet queuing.
@@ -268,6 +282,19 @@ with the node for routing.
 The `dns.ttl` value should not exceed `node.cache.coord_ttl_secs` to avoid
 stale address mappings.
 
+### Host Mapping
+
+The DNS resolver checks a host map before falling back to direct npub
+resolution, enabling names like `gateway.fips` instead of `npub1...fips`.
+The host map is populated from two sources:
+
+1. **Peer aliases** — the `alias` field on configured peers in `peers:`.
+2. **Hosts file** — `/etc/fips/hosts`, one `hostname npub1...` per line.
+   Blank lines and `#` comments are allowed.
+
+The hosts file is auto-reloaded on modification (mtime change) without
+restarting the daemon. Hostnames are case-insensitive.
+
 ## Transports (`transports.*`)
 
 ### UDP (`transports.udp.*`)
@@ -288,7 +315,7 @@ Requires `CAP_NET_RAW` or running as root. Linux only.
 |-----------|------|---------|-------------|
 | `interface` | string | *(required)* | Network interface name (e.g., `"eth0"`, `"enp3s0"`) |
 | `ethertype` | u16 | `0x2121` | EtherType |
-| `mtu` | u16 | *(auto)* | Override MTU. Default: interface MTU minus 1 (for frame type prefix) |
+| `mtu` | u16 | *(auto)* | Override MTU. Default: interface MTU minus 3 (for frame type + length prefix) |
 | `recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB) |
 | `send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB) |
 | `discovery` | bool | `true` | Listen for discovery beacons from other nodes |
@@ -324,7 +351,7 @@ overhead.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `transports.tcp.bind_addr` | string | *(none)* | Listen address (e.g., `"0.0.0.0:443"`). If omitted, outbound-only mode. |
+| `transports.tcp.bind_addr` | string | *(none)* | Listen address (e.g., `"0.0.0.0:8443"`). If omitted, outbound-only mode. |
 | `transports.tcp.mtu` | u16 | `1400` | Default MTU. Per-connection MTU derived from `TCP_MAXSEG` when available. |
 | `transports.tcp.connect_timeout_ms` | u64 | `5000` | Outbound connect timeout in milliseconds |
 | `transports.tcp.nodelay` | bool | `true` | `TCP_NODELAY` (disable Nagle for low latency) |
@@ -514,6 +541,10 @@ node:
     enabled: true                    # ECN congestion signaling (CE flag relay)
     loss_threshold: 0.05             # MMP loss rate threshold for CE marking (5%)
     etx_threshold: 3.0               # MMP ETX threshold for CE marking
+  rekey:
+    enabled: true                    # periodic Noise rekey for forward secrecy
+    after_secs: 120                  # rekey interval (seconds)
+    after_messages: 65536            # rekey after N messages sent
   control:
     enabled: true
     socket_path: null                # null = auto ($XDG_RUNTIME_DIR → /run/fips → /tmp fallback)
@@ -542,7 +573,7 @@ transports:
   # ethernet:                        # uncomment to enable (requires CAP_NET_RAW)
   #   interface: "eth0"              # required: network interface name
   #   ethertype: 0x2121              # default EtherType
-  #   mtu: null                      # null = interface MTU - 1 (typically 1499)
+  #   mtu: null                      # null = interface MTU - 3 (typically 1497)
   #   recv_buf_size: 2097152         # 2 MB
   #   send_buf_size: 2097152         # 2 MB
   #   discovery: true                # listen for beacons
@@ -551,7 +582,7 @@ transports:
   #   accept_connections: false      # accept inbound handshakes
   #   beacon_interval_secs: 30       # beacon interval (min 10)
   # tcp:                             # uncomment to enable TCP transport
-  #   bind_addr: "0.0.0.0:443"      # listen address (omit for outbound-only)
+  #   bind_addr: "0.0.0.0:8443"     # listen address (omit for outbound-only)
   #   mtu: 1400                      # default MTU
   #   connect_timeout_ms: 5000       # outbound connect timeout
   #   nodelay: true                  # TCP_NODELAY

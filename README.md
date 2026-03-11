@@ -42,11 +42,11 @@ endpoints.
 - **Multi-transport** — UDP, TCP, and Ethernet today; designed for
   Bluetooth, serial, radio, and Tor
 - **Noise encryption** — hop-by-hop link encryption plus independent
-  end-to-end session encryption
+  end-to-end session encryption, with periodic rekey for forward secrecy
 - **Nostr-native identity** — secp256k1 keypairs as node addresses, no
   registration or central authority
 - **IPv6 adaptation** — TUN interface maps npubs to fd00::/8 addresses for
-  unmodified IP applications
+  unmodified IP applications; static hostname mapping (`/etc/fips/hosts`)
 - **Metrics Measurement Protocol** — per-link RTT, loss, jitter, and goodput
   measurement
 - **ECN congestion signaling** — hop-by-hop CE flag relay with RFC 3168 IPv6
@@ -248,8 +248,11 @@ UDP, TCP, and Ethernet but has not been tested beyond small meshes.
 - Spanning tree construction with greedy coordinate routing
 - Bloom filter discovery for finding nodes without global state
 - Noise IK (link layer) and Noise XK (session layer) encryption
+- Periodic Noise rekey with forward secrecy (FMP + FSP)
+- Persistent node identity with key file management
 - IPv6 TUN adapter with DNS resolution of `.fips` names
-- Per-link metrics (RTT, loss, jitter, goodput)
+- Static hostname mapping (`/etc/fips/hosts`) with auto-reload
+- Per-link metrics (RTT, loss, jitter, goodput) and mesh size estimation
 - ECN congestion signaling (hop-by-hop CE relay, IPv6 CE marking, kernel drop detection)
 - UDP, TCP, and Ethernet transports
 - Runtime inspection via `fipsctl` and `fipstop`

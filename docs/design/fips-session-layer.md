@@ -538,7 +538,7 @@ MMP session metrics session=npub1tdwa...84le rtt=4.3ms loss=0.6% jitter=0.2ms go
 | PathBroken handling | **Implemented** |
 | Simultaneous initiation tie-breaker | **Implemented** |
 | Flush coord cache on parent change | **Implemented** |
-| Rekey | Planned |
+| Rekey | **Implemented** |
 | Path MTU tracking (FMP SessionDatagram field) | **Implemented** |
 | Path MTU notification (end-to-end echo) | **Implemented** |
 

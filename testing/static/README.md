@@ -90,13 +90,19 @@ appear in the topology file so that Docker nodes can peer with them.
 
 ### TCP Chain
 
-Three nodes in a linear chain using TCP transport (port 443) instead of
+Three nodes in a linear chain using TCP transport (port 8443) instead of
 UDP: A -- B -- C. Each node peers only with its immediate neighbors.
 Tests basic TCP transport connectivity and multi-hop routing over TCP.
 
 The topology file sets `default_transport: tcp`, which causes config
-generation to use TCP peer addresses (port 443), inject the TCP transport
+generation to use TCP peer addresses (port 8443), inject the TCP transport
 section, and remove the UDP transport section.
+
+### Rekey
+
+Same sparse mesh as the mesh topology (5 nodes, 6 links). Configs are
+post-processed to use aggressive rekey timers (35s) for CI testing. The
+`rekey-test.sh` script handles config injection and multi-phase verification.
 
 ## Configuration Management
 
@@ -114,7 +120,8 @@ testing/static/
 │       ├── mesh.yaml                   # Mesh topology definition
 │       ├── chain.yaml                  # Chain topology definition
 │       ├── mesh-public.yaml            # Mesh + external public node
-│       └── tcp-chain.yaml             # TCP chain (3 nodes, port 443)
+│       ├── tcp-chain.yaml             # TCP chain (3 nodes, port 8443)
+│       └── rekey.yaml                 # Rekey integration test (5 nodes)
 ├── generated-configs/                  # Auto-generated (gitignored)
 │   ├── npubs.env                       # NPUB_A=..., NPUB_B=..., etc.
 │   ├── mesh/
@@ -319,7 +326,7 @@ removing rules first.
 - **Capabilities**: `CAP_NET_ADMIN` (for TUN device creation)
 - **Devices**: `/dev/net/tun` mapped into each container
 - **DNS**: FIPS built-in resolver on `127.0.0.1:53`
-- **Transport**: UDP on port 2121 (MTU 1472) or TCP on port 443
+- **Transport**: UDP on port 2121 (MTU 1472) or TCP on port 8443
 - **TUN**: `fips0` interface, MTU 1280
 
 Each node resolves `<npub>.fips` DNS names to FIPS IPv6 addresses via its

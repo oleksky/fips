@@ -23,11 +23,14 @@ transports (TCP, WebSocket, Tor) must delineate FIPS packets within the
 byte stream; the common prefix `payload_len` field provides this
 framing directly.
 
-**Ethernet frame type prefix.** The Ethernet transport prepends a 1-byte
-frame type before the FMP payload: `0x00` for data frames and `0x01` for
-beacon (discovery) frames. This byte is consumed by the transport layer
-and is not visible to FMP. The effective MTU for FMP is the interface
-MTU minus one byte (typically 1499).
+**Ethernet data frame header.** The Ethernet transport prepends a 3-byte
+header before the FMP payload on data frames: a 1-byte frame type
+(`0x00`) followed by a 2-byte little-endian payload length. The length
+field allows the receiver to trim Ethernet minimum-frame padding that
+would otherwise corrupt AEAD verification. Beacon frames (`0x01`) have
+no length field (fixed 34-byte payload). These bytes are consumed by the
+transport layer and are not visible to FMP. The effective MTU for FMP is
+the interface MTU minus three bytes (typically 1497).
 
 ## Link-Layer Formats
 
