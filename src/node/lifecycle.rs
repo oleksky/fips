@@ -3,7 +3,7 @@
 use super::{Node, NodeError, NodeState};
 use crate::peer::PeerConnection;
 use crate::protocol::{Disconnect, DisconnectReason};
-use crate::transport::{packet_channel, Link, LinkDirection, TransportAddr, TransportId};
+use crate::transport::{packet_channel, Link, LinkDirection, LinkId, TransportAddr, TransportId};
 use crate::upper::tun::{run_tun_reader, shutdown_tun_interface, TunDevice, TunState};
 use crate::node::wire::build_msg1;
 use crate::{NodeAddr, PeerIdentity};
@@ -143,9 +143,14 @@ impl Node {
 
     /// Initiate a connection to a peer on a specific transport and address.
     ///
-    /// Allocates a link, starts the Noise IK handshake, sends msg1, and
-    /// registers the connection for msg2 dispatch. Used by both static peer
-    /// config and transport discovery auto-connect paths.
+    /// For connectionless transports (UDP, Ethernet): allocates a link, starts
+    /// the Noise IK handshake, sends msg1, and registers the connection for
+    /// msg2 dispatch.
+    ///
+    /// For connection-oriented transports (TCP, Tor): allocates a link and
+    /// starts a non-blocking transport connect. The handshake is deferred
+    /// until the transport connection is established — the tick handler
+    /// polls `connection_state()` and initiates the handshake when ready.
     pub(super) async fn initiate_connection(
         &mut self,
         transport_id: TransportId,
@@ -154,15 +159,14 @@ impl Node {
     ) -> Result<(), NodeError> {
         let peer_node_addr = *peer_identity.node_addr();
 
+        let is_connection_oriented = self.transports.get(&transport_id)
+            .map(|t| t.transport_type().connection_oriented)
+            .unwrap_or(false);
+
         // Allocate link ID and create link
         let link_id = self.allocate_link_id();
 
-        // Use Link::new() for connection-oriented transports (Connecting state)
-        // and Link::connectionless() for connectionless transports (Connected state)
-        let link = if self.transports.get(&transport_id)
-            .map(|t| t.transport_type().connection_oriented)
-            .unwrap_or(false)
-        {
+        let link = if is_connection_oriented {
             Link::new(
                 link_id,
                 transport_id,
@@ -185,6 +189,53 @@ impl Node {
         // Add reverse lookup for packet dispatch
         self.addr_to_link
             .insert((transport_id, remote_addr.clone()), link_id);
+
+        if is_connection_oriented {
+            // Connection-oriented: start non-blocking connect, defer handshake
+            if let Some(transport) = self.transports.get(&transport_id) {
+                match transport.connect(&remote_addr).await {
+                    Ok(()) => {
+                        debug!(
+                            peer = %self.peer_display_name(&peer_node_addr),
+                            transport_id = %transport_id,
+                            remote_addr = %remote_addr,
+                            link_id = %link_id,
+                            "Transport connect initiated (non-blocking)"
+                        );
+                        self.pending_connects.push(super::PendingConnect {
+                            link_id,
+                            transport_id,
+                            remote_addr,
+                            peer_identity,
+                        });
+                    }
+                    Err(e) => {
+                        // Clean up link
+                        self.links.remove(&link_id);
+                        self.addr_to_link.remove(&(transport_id, remote_addr));
+                        return Err(NodeError::TransportError(e.to_string()));
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            // Connectionless: proceed with immediate handshake
+            self.start_handshake(link_id, transport_id, remote_addr, peer_identity).await
+        }
+    }
+
+    /// Start the Noise handshake on a link and send msg1.
+    ///
+    /// Called immediately for connectionless transports, or after the
+    /// transport connection is established for connection-oriented transports.
+    pub(super) async fn start_handshake(
+        &mut self,
+        link_id: LinkId,
+        transport_id: TransportId,
+        remote_addr: TransportAddr,
+        peer_identity: PeerIdentity,
+    ) -> Result<(), NodeError> {
+        let peer_node_addr = *peer_identity.node_addr();
 
         // Create connection in handshake phase (outbound knows expected identity)
         let current_time_ms = std::time::SystemTime::now()
@@ -332,6 +383,99 @@ impl Node {
             );
             if let Err(e) = self.initiate_connection(transport_id, remote_addr, identity).await {
                 warn!(error = %e, "Failed to auto-connect to discovered peer");
+            }
+        }
+    }
+
+    /// Poll pending transport connects and initiate handshakes for ready ones.
+    ///
+    /// Called from the tick handler. For each pending connect, queries the
+    /// transport's connection state. When a connection is established,
+    /// marks the link as Connected and starts the Noise handshake.
+    /// Failed connections are cleaned up and scheduled for retry.
+    pub(super) async fn poll_pending_connects(&mut self) {
+        if self.pending_connects.is_empty() {
+            return;
+        }
+
+        let mut completed = Vec::new();
+
+        for (i, pending) in self.pending_connects.iter().enumerate() {
+            let state = if let Some(transport) = self.transports.get(&pending.transport_id) {
+                transport.connection_state(&pending.remote_addr)
+            } else {
+                crate::transport::ConnectionState::Failed("transport removed".into())
+            };
+
+            match state {
+                crate::transport::ConnectionState::Connected => {
+                    completed.push((i, true, None));
+                }
+                crate::transport::ConnectionState::Failed(reason) => {
+                    completed.push((i, false, Some(reason)));
+                }
+                crate::transport::ConnectionState::Connecting => {
+                    // Still in progress, check on next tick
+                }
+                crate::transport::ConnectionState::None => {
+                    // Shouldn't happen — treat as failure
+                    completed.push((i, false, Some("no connection attempt found".into())));
+                }
+            }
+        }
+
+        // Process completions in reverse order to preserve indices
+        for (i, success, reason) in completed.into_iter().rev() {
+            let pending = self.pending_connects.remove(i);
+
+            if success {
+                // Mark link as Connected
+                if let Some(link) = self.links.get_mut(&pending.link_id) {
+                    link.set_connected();
+                }
+
+                debug!(
+                    peer = %self.peer_display_name(pending.peer_identity.node_addr()),
+                    transport_id = %pending.transport_id,
+                    remote_addr = %pending.remote_addr,
+                    link_id = %pending.link_id,
+                    "Transport connected, starting handshake"
+                );
+
+                // Start the handshake now that the transport is connected
+                if let Err(e) = self.start_handshake(
+                    pending.link_id,
+                    pending.transport_id,
+                    pending.remote_addr.clone(),
+                    pending.peer_identity,
+                ).await {
+                    warn!(
+                        link_id = %pending.link_id,
+                        error = %e,
+                        "Failed to start handshake after transport connect"
+                    );
+                    // Clean up link on handshake failure
+                    self.remove_link(&pending.link_id);
+                }
+            } else {
+                let reason = reason.unwrap_or_default();
+                warn!(
+                    peer = %self.peer_display_name(pending.peer_identity.node_addr()),
+                    transport_id = %pending.transport_id,
+                    remote_addr = %pending.remote_addr,
+                    link_id = %pending.link_id,
+                    reason = %reason,
+                    "Transport connect failed"
+                );
+
+                // Clean up link and schedule retry
+                self.remove_link(&pending.link_id);
+                self.links.remove(&pending.link_id);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                self.schedule_retry(*pending.peer_identity.node_addr(), now_ms, false);
             }
         }
     }

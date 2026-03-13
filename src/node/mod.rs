@@ -119,6 +119,9 @@ pub enum NodeError {
 
     #[error("handshake failed: {0}")]
     HandshakeFailed(String),
+
+    #[error("transport error: {0}")]
+    TransportError(String),
 }
 
 /// Node operational state.
@@ -206,6 +209,22 @@ struct TransportDropState {
     prev_drops: u64,
     /// True if drops increased since the last sample.
     dropping: bool,
+}
+
+/// State for a link waiting for transport-level connection establishment.
+///
+/// For connection-oriented transports (TCP, Tor), the transport connect runs
+/// asynchronously. This struct holds the data needed to complete the handshake
+/// once the connection is ready.
+struct PendingConnect {
+    /// The link that was created for this connection.
+    link_id: LinkId,
+    /// Which transport is being used.
+    transport_id: TransportId,
+    /// The remote address being connected to.
+    remote_addr: TransportAddr,
+    /// The peer identity (for handshake initiation).
+    peer_identity: PeerIdentity,
 }
 
 /// A running FIPS node instance.
@@ -363,6 +382,13 @@ pub struct Node {
     /// Rate limiter for source-side CoordsRequired/PathBroken responses.
     coords_response_rate_limiter: RoutingErrorRateLimiter,
 
+    // === Pending Transport Connects ===
+    /// Links waiting for transport-level connection establishment before
+    /// sending handshake msg1. For connection-oriented transports (TCP, Tor),
+    /// the transport connect runs in the background; the tick handler polls
+    /// connection_state() and initiates the handshake when connected.
+    pending_connects: Vec<PendingConnect>,
+
     // === Connection Retry ===
     /// Retry state for peers whose outbound connections have failed.
     /// Keyed by NodeAddr. Entries are created when a handshake times out
@@ -499,6 +525,7 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
                 std::time::Duration::from_millis(coords_response_interval_ms),
             ),
+            pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
             last_parent_reeval: None,
             last_congestion_log: None,
@@ -601,6 +628,7 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval(
                 std::time::Duration::from_millis(coords_response_interval_ms),
             ),
+            pending_connects: Vec::new(),
             retry_pending: HashMap::new(),
             last_parent_reeval: None,
             last_congestion_log: None,

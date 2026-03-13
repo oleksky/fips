@@ -792,6 +792,26 @@ pub trait Transport {
 }
 
 // ============================================================================
+// Connection State (for non-blocking connect)
+// ============================================================================
+
+/// State of a transport-level connection attempt.
+///
+/// Used by connection-oriented transports (TCP, Tor) to report the progress
+/// of a background connection attempt initiated by `connect()`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// No connection attempt in progress for this address.
+    None,
+    /// Connection attempt is in progress (background task running).
+    Connecting,
+    /// Connection is established and ready for send().
+    Connected,
+    /// Connection attempt failed with the given error message.
+    Failed(String),
+}
+
+// ============================================================================
 // Transport Congestion
 // ============================================================================
 
@@ -965,6 +985,36 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.accept_connections(),
             TransportHandle::Tcp(t) => t.accept_connections(),
+        }
+    }
+
+    /// Initiate a non-blocking connection to a remote address.
+    ///
+    /// For connection-oriented transports (TCP, Tor), spawns a background
+    /// task to establish the connection. For connectionless transports
+    /// (UDP, Ethernet), this is a no-op that returns Ok immediately.
+    ///
+    /// Poll `connection_state()` to check when the connection is ready.
+    pub async fn connect(&self, addr: &TransportAddr) -> Result<(), TransportError> {
+        match self {
+            TransportHandle::Udp(_) => Ok(()), // connectionless
+            #[cfg(target_os = "linux")]
+            TransportHandle::Ethernet(_) => Ok(()), // connectionless
+            TransportHandle::Tcp(t) => t.connect_async(addr).await,
+        }
+    }
+
+    /// Query the state of a connection attempt to a remote address.
+    ///
+    /// For connectionless transports, always returns `ConnectionState::Connected`
+    /// (they are always "connected"). For connection-oriented transports, returns
+    /// the current state of the background connection attempt.
+    pub fn connection_state(&self, addr: &TransportAddr) -> ConnectionState {
+        match self {
+            TransportHandle::Udp(_) => ConnectionState::Connected,
+            #[cfg(target_os = "linux")]
+            TransportHandle::Ethernet(_) => ConnectionState::Connected,
+            TransportHandle::Tcp(t) => t.connection_state_sync(addr),
         }
     }
 

@@ -26,13 +26,14 @@ pub mod stats;
 pub mod stream;
 
 use super::{
-    DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr, TransportError,
-    TransportId, TransportState, TransportType,
+    ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
+    TransportError, TransportId, TransportState, TransportType,
 };
 use crate::config::TcpConfig;
 use stats::TcpStats;
 use stream::read_fmp_packet;
 
+use futures::FutureExt;
 use socket2::TcpKeepalive;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -67,6 +68,18 @@ struct TcpConnection {
 /// Shared connection pool.
 type ConnectionPool = Arc<Mutex<HashMap<TransportAddr, TcpConnection>>>;
 
+/// A pending background connection attempt.
+///
+/// Holds the JoinHandle for a spawned TCP connect task. The task
+/// produces a configured `TcpStream` and MSS-derived MTU on success.
+struct ConnectingEntry {
+    /// Background task performing TCP connect + socket configuration.
+    task: JoinHandle<Result<(TcpStream, u16), TransportError>>,
+}
+
+/// Map of addresses with background connection attempts in progress.
+type ConnectingPool = Arc<Mutex<HashMap<TransportAddr, ConnectingEntry>>>;
+
 // ============================================================================
 // TCP Transport
 // ============================================================================
@@ -85,8 +98,10 @@ pub struct TcpTransport {
     config: TcpConfig,
     /// Current state.
     state: TransportState,
-    /// Connection pool: addr -> per-connection state.
+    /// Connection pool: addr -> established connections.
     pool: ConnectionPool,
+    /// Pending connection attempts: addr -> background connect task.
+    connecting: ConnectingPool,
     /// Channel for delivering received packets to Node.
     packet_tx: PacketTx,
     /// Accept loop task handle (if listener bound).
@@ -111,6 +126,7 @@ impl TcpTransport {
             config,
             state: TransportState::Configured,
             pool: Arc::new(Mutex::new(HashMap::new())),
+            connecting: Arc::new(Mutex::new(HashMap::new())),
             packet_tx,
             accept_task: None,
             local_addr: None,
@@ -212,7 +228,19 @@ impl TcpTransport {
             let _ = task.await;
         }
 
-        // Close all connections
+        // Abort pending connection attempts
+        let mut connecting = self.connecting.lock().await;
+        for (addr, entry) in connecting.drain() {
+            entry.task.abort();
+            debug!(
+                transport_id = %self.transport_id,
+                remote_addr = %addr,
+                "TCP connect aborted (transport stopping)"
+            );
+        }
+        drop(connecting);
+
+        // Close all established connections
         let mut pool = self.pool.lock().await;
         for (addr, conn) in pool.drain() {
             conn.recv_task.abort();
@@ -393,6 +421,214 @@ impl TcpTransport {
                 transport_id = %self.transport_id,
                 remote_addr = %addr,
                 "TCP connection closed (close_connection)"
+            );
+        }
+    }
+
+    /// Initiate a non-blocking connection to a remote address.
+    ///
+    /// Spawns a background task that performs TCP connect with timeout,
+    /// configures socket options, and reads MSS. The connection becomes
+    /// available for `send_async()` once the task completes successfully.
+    ///
+    /// Poll `connection_state_sync()` to check progress.
+    pub async fn connect_async(&self, addr: &TransportAddr) -> Result<(), TransportError> {
+        if !self.state.is_operational() {
+            return Err(TransportError::NotStarted);
+        }
+
+        // Already established?
+        {
+            let pool = self.pool.lock().await;
+            if pool.contains_key(addr) {
+                return Ok(());
+            }
+        }
+
+        // Already connecting?
+        {
+            let connecting = self.connecting.lock().await;
+            if connecting.contains_key(addr) {
+                return Ok(());
+            }
+        }
+
+        let socket_addr = parse_socket_addr(addr)?;
+        let timeout_ms = self.config.connect_timeout_ms();
+        let config = self.config.clone();
+        let transport_id = self.transport_id;
+        let remote_addr = addr.clone();
+
+        debug!(
+            transport_id = %transport_id,
+            remote_addr = %remote_addr,
+            timeout_ms,
+            "Initiating background TCP connect"
+        );
+
+        let task = tokio::spawn(async move {
+            // Connect with timeout
+            let stream = match tokio::time::timeout(
+                Duration::from_millis(timeout_ms),
+                TcpStream::connect(socket_addr),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(e)) => {
+                    debug!(
+                        transport_id = %transport_id,
+                        remote_addr = %remote_addr,
+                        error = %e,
+                        "Background TCP connect refused"
+                    );
+                    return Err(TransportError::ConnectionRefused);
+                }
+                Err(_) => {
+                    debug!(
+                        transport_id = %transport_id,
+                        remote_addr = %remote_addr,
+                        "Background TCP connect timed out"
+                    );
+                    return Err(TransportError::Timeout);
+                }
+            };
+
+            // Configure socket options via socket2
+            let std_stream = stream.into_std()
+                .map_err(|e| TransportError::StartFailed(format!("into_std: {}", e)))?;
+            configure_socket(&std_stream, &config)?;
+
+            // Read TCP_MAXSEG for per-connection MTU
+            let mss_mtu = read_mss_mtu(&std_stream, config.mtu());
+
+            // Convert back to tokio
+            let stream = TcpStream::from_std(std_stream)
+                .map_err(|e| TransportError::StartFailed(format!("from_std: {}", e)))?;
+
+            Ok((stream, mss_mtu))
+        });
+
+        let mut connecting = self.connecting.lock().await;
+        connecting.insert(addr.clone(), ConnectingEntry { task });
+
+        Ok(())
+    }
+
+    /// Query the state of a connection to a remote address.
+    ///
+    /// Checks both established and connecting pools. If a background
+    /// connect task has completed, promotes it to the established pool
+    /// (spawning a receive loop) or reports the failure.
+    ///
+    /// This method is synchronous but uses `try_lock` internally.
+    /// Returns `ConnectionState::Connecting` if locks can't be acquired.
+    pub fn connection_state_sync(&self, addr: &TransportAddr) -> ConnectionState {
+        // Check established pool first
+        if let Ok(pool) = self.pool.try_lock() {
+            if pool.contains_key(addr) {
+                return ConnectionState::Connected;
+            }
+        } else {
+            return ConnectionState::Connecting; // can't tell, assume still going
+        }
+
+        // Check connecting pool
+        let mut connecting = match self.connecting.try_lock() {
+            Ok(c) => c,
+            Err(_) => return ConnectionState::Connecting,
+        };
+
+        let entry = match connecting.get_mut(addr) {
+            Some(e) => e,
+            None => return ConnectionState::None,
+        };
+
+        // Check if the background task has completed
+        if !entry.task.is_finished() {
+            return ConnectionState::Connecting;
+        }
+
+        // Task is done — take the result and remove from connecting pool.
+        // We need to poll the finished task. Since it's finished, we use
+        // now_or_never to get the result without blocking.
+        let addr_clone = addr.clone();
+        let task = connecting.remove(&addr_clone).unwrap().task;
+
+        // Use futures::FutureExt::now_or_never or block_on for the finished task.
+        // Since the task is finished, we can safely poll it.
+        match task.now_or_never() {
+            Some(Ok(Ok((stream, mss_mtu)))) => {
+                // Promote to established pool
+                self.promote_connection(addr, stream, mss_mtu);
+                ConnectionState::Connected
+            }
+            Some(Ok(Err(e))) => {
+                ConnectionState::Failed(format!("{}", e))
+            }
+            Some(Err(e)) => {
+                // JoinError (panic or cancel)
+                ConnectionState::Failed(format!("task failed: {}", e))
+            }
+            None => {
+                // Shouldn't happen since is_finished() was true
+                ConnectionState::Connecting
+            }
+        }
+    }
+
+    /// Promote a completed background connection to the established pool.
+    ///
+    /// Splits the stream, spawns a receive loop, and inserts into the pool.
+    /// Called from `connection_state_sync()` when a background task completes.
+    fn promote_connection(&self, addr: &TransportAddr, stream: TcpStream, mss_mtu: u16) {
+        let (read_half, write_half) = stream.into_split();
+        let writer = Arc::new(Mutex::new(write_half));
+
+        let transport_id = self.transport_id;
+        let packet_tx = self.packet_tx.clone();
+        let pool = self.pool.clone();
+        let recv_stats = self.stats.clone();
+        let remote_addr = addr.clone();
+
+        let recv_task = tokio::spawn(async move {
+            tcp_receive_loop(
+                read_half,
+                transport_id,
+                remote_addr.clone(),
+                packet_tx,
+                pool,
+                mss_mtu,
+                recv_stats,
+            )
+            .await;
+        });
+
+        let conn = TcpConnection {
+            writer,
+            recv_task,
+            mtu: mss_mtu,
+            established_at: Instant::now(),
+        };
+
+        // Use try_lock since we're in a sync context and the pool
+        // should be available (connection_state_sync already checked it)
+        if let Ok(mut pool) = self.pool.try_lock() {
+            pool.insert(addr.clone(), conn);
+            self.stats.record_connection_established();
+            debug!(
+                transport_id = %self.transport_id,
+                remote_addr = %addr,
+                mtu = mss_mtu,
+                "TCP connection established (background connect)"
+            );
+        } else {
+            // Pool locked — abort the recv task, connection will be retried
+            conn.recv_task.abort();
+            warn!(
+                transport_id = %self.transport_id,
+                remote_addr = %addr,
+                "Failed to promote connection (pool locked)"
             );
         }
     }
@@ -1119,5 +1355,160 @@ mod tests {
 
         t1.stop_async().await.unwrap();
         t2.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connect_async_success() {
+        let (tx1, mut rx1) = packet_channel(100);
+        let (tx2, _rx2) = packet_channel(100);
+
+        let mut t1 = TcpTransport::new(TransportId::new(1), None, make_outbound_config(), tx1);
+        let mut t2 = TcpTransport::new(TransportId::new(2), None, make_config(), tx2);
+
+        t1.start_async().await.unwrap();
+        t2.start_async().await.unwrap();
+
+        let addr2 = t2.local_addr().unwrap();
+        let remote = TransportAddr::from_string(&addr2.to_string());
+
+        // State should be None before connect
+        assert_eq!(t1.connection_state_sync(&remote), ConnectionState::None);
+
+        // Initiate non-blocking connect
+        t1.connect_async(&remote).await.unwrap();
+
+        // Wait for the background connect to complete
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Poll state — should be Connected now
+        let state = t1.connection_state_sync(&remote);
+        assert_eq!(state, ConnectionState::Connected);
+
+        // Now send should work (connection already established)
+        let mut msg1 = vec![0xAA; 114];
+        msg1[0] = 0x01;
+        msg1[1] = 0x00;
+        msg1[2..4].copy_from_slice(&110u16.to_le_bytes());
+
+        t1.send_async(&remote, &msg1).await.unwrap();
+
+        let packet = timeout(Duration::from_secs(2), rx1.recv())
+            .await;
+        // We receive on rx1 but that's the wrong receiver — t2's rx gets the packet
+        // Just verify send didn't error
+        drop(packet);
+
+        t1.stop_async().await.unwrap();
+        t2.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connect_async_timeout() {
+        let (tx, _rx) = packet_channel(100);
+        let config = TcpConfig {
+            bind_addr: None,
+            connect_timeout_ms: Some(100), // Very short timeout
+            ..Default::default()
+        };
+        let mut transport = TcpTransport::new(TransportId::new(1), None, config, tx);
+        transport.start_async().await.unwrap();
+
+        let remote = TransportAddr::from_string("192.0.2.1:2121");
+        transport.connect_async(&remote).await.unwrap();
+
+        // Wait for timeout
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let state = transport.connection_state_sync(&remote);
+        assert!(matches!(state, ConnectionState::Failed(_)));
+
+        transport.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connect_async_not_started() {
+        let (tx, _rx) = packet_channel(100);
+        let transport = TcpTransport::new(TransportId::new(1), None, make_config(), tx);
+
+        let result = transport
+            .connect_async(&TransportAddr::from_string("127.0.0.1:9999"))
+            .await;
+
+        assert!(matches!(result, Err(TransportError::NotStarted)));
+    }
+
+    #[tokio::test]
+    async fn test_connect_async_already_connected() {
+        let (tx1, _rx1) = packet_channel(100);
+        let (tx2, _rx2) = packet_channel(100);
+
+        let mut t1 = TcpTransport::new(TransportId::new(1), None, make_outbound_config(), tx1);
+        let mut t2 = TcpTransport::new(TransportId::new(2), None, make_config(), tx2);
+
+        t1.start_async().await.unwrap();
+        t2.start_async().await.unwrap();
+
+        let addr2 = t2.local_addr().unwrap();
+        let remote = TransportAddr::from_string(&addr2.to_string());
+
+        // Connect first time
+        t1.connect_async(&remote).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(t1.connection_state_sync(&remote), ConnectionState::Connected);
+
+        // Second connect should be a no-op (already connected)
+        t1.connect_async(&remote).await.unwrap();
+
+        t1.stop_async().await.unwrap();
+        t2.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connect_async_then_send_recv() {
+        let (tx1, _rx1) = packet_channel(100);
+        let (tx2, mut rx2) = packet_channel(100);
+
+        let mut t1 = TcpTransport::new(TransportId::new(1), None, make_outbound_config(), tx1);
+        let mut t2 = TcpTransport::new(TransportId::new(2), None, make_config(), tx2);
+
+        t1.start_async().await.unwrap();
+        t2.start_async().await.unwrap();
+
+        let addr2 = t2.local_addr().unwrap();
+        let remote = TransportAddr::from_string(&addr2.to_string());
+
+        // Connect first, then send
+        t1.connect_async(&remote).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(t1.connection_state_sync(&remote), ConnectionState::Connected);
+
+        // Build valid FMP msg1 frame
+        let mut msg1 = vec![0xAA; 114];
+        msg1[0] = 0x01;
+        msg1[1] = 0x00;
+        msg1[2..4].copy_from_slice(&110u16.to_le_bytes());
+
+        // Send using the pre-established connection
+        t1.send_async(&remote, &msg1).await.unwrap();
+
+        let packet = timeout(Duration::from_secs(2), rx2.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert_eq!(packet.data, msg1);
+
+        t1.stop_async().await.unwrap();
+        t2.stop_async().await.unwrap();
+    }
+
+    #[test]
+    fn test_connection_state_none_for_unknown() {
+        let (tx, _rx) = packet_channel(100);
+        let transport = TcpTransport::new(TransportId::new(1), None, make_config(), tx);
+
+        let state = transport.connection_state_sync(
+            &TransportAddr::from_string("unknown:1234"),
+        );
+        assert_eq!(state, ConnectionState::None);
     }
 }

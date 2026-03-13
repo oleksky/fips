@@ -107,6 +107,7 @@ impl Node {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
+                    self.poll_pending_connects().await;
                     self.resend_pending_handshakes(now_ms).await;
                     self.resend_pending_rekeys(now_ms).await;
                     self.resend_pending_session_handshakes(now_ms).await;
