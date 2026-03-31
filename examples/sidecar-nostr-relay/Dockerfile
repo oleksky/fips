@@ -1,3 +1,19 @@
+# ── Build stage: compile FIPS from source ──
+FROM rust:1.94-slim-trixie AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
+COPY src ./src
+
+RUN cargo build --release --no-default-features --features tui && \
+    cp target/release/fips target/release/fipsctl target/release/fipstop /usr/local/bin/
+
+# ── Runtime stage ──
 FROM debian:trixie-slim
 
 RUN apt-get update && \
@@ -45,9 +61,8 @@ RUN printf '%s\n' \
     'no-resolv' \
     >> /etc/dnsmasq.conf
 
-COPY fips fipsctl fipstop /usr/local/bin/
-RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop
+COPY --from=builder /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop /usr/local/bin/
 
-COPY entrypoint.sh /entrypoint.sh
+COPY examples/sidecar-nostr-relay/entrypoint.sh /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

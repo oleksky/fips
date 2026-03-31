@@ -121,7 +121,10 @@ fn main() {
         .expect("failed to create tokio runtime");
 
     let client = ControlClient::new(&socket_path);
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init().unwrap_or_else(|e| {
+        eprintln!("fipstop: failed to initialize terminal: {e}");
+        std::process::exit(1);
+    });
     let mut app = App::new(refresh);
     let events = EventHandler::new(refresh);
 

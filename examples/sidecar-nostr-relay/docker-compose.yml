@@ -9,7 +9,8 @@ networks:
 services:
   fips:
     build:
-      context: .
+      context: ../..
+      dockerfile: examples/sidecar-nostr-relay/Dockerfile
     hostname: fips-sidecar
     cap_add:
       - NET_ADMIN

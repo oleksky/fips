@@ -7,19 +7,7 @@ iptables — it can only be reached via the node's `.fips` name.
 
 ## How to Run
 
-### 1. Build the FIPS binaries
-
-From the repo root, compile FIPS for Linux and copy the binaries into the
-Docker build context:
-
-```bash
-cd examples/sidecar-nostr-relay
-./scripts/build.sh
-```
-
-Cross-compilation from macOS is supported via `cargo-zigbuild`.
-
-### 2. Set your node identity
+### 1. Set your node identity
 
 The relay needs a unique FIPS identity. Generate one with:
 
@@ -36,9 +24,13 @@ FIPS_NSEC=nsec1...   # paste your nsec here
 
 `FIPS_NSEC` is required — the container will refuse to start without it.
 
-### 3. Start the stack
+### 2. Start the stack
+
+FIPS is compiled from source inside the Docker build stage — no local Rust
+toolchain, Zig, or cargo-zigbuild needed.
 
 ```bash
+cd examples/sidecar-nostr-relay
 docker compose up -d
 ```
 
@@ -47,7 +39,7 @@ This starts two containers that share a network namespace:
 - **fips** — FIPS daemon + dnsmasq. Owns the namespace, creates `fips0`.
 - **app** — strfry relay + nginx. Joins the namespace via `network_mode: service:fips`.
 
-### 4. Verify
+### 3. Verify
 
 ```bash
 # FIPS node is up and has a mesh address:
@@ -63,7 +55,7 @@ docker exec sidecar-nostr-relay-fips-1 fipsctl show peers
 docker compose logs -f
 ```
 
-### 5. Connect to the relay
+### 4. Connect to the relay
 
 Your node's npub (and therefore its `.fips` name) is derived from its keypair:
 
@@ -145,17 +137,6 @@ DNS inside the container is handled by dnsmasq (127.0.0.1:53):
 
 The `resolv.conf` mount points the container's resolver at 127.0.0.1,
 where dnsmasq handles the routing.
-
-## Build
-
-```bash
-cd examples/sidecar-nostr-relay
-./scripts/build.sh
-```
-
-This compiles FIPS for Linux, copies the binaries into the Docker context,
-and builds the sidecar and app images. Cross-compilation from macOS is
-supported via `cargo-zigbuild`.
 
 ## Run with Peers
 
