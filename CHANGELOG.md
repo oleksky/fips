@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bind with `EAFNOSUPPORT`
   ([#61](https://github.com/jmcorgan/fips/issues/61),
   reported by [@SwapMarket](https://github.com/SwapMarket))
+- Tighten TreeAnnounce ancestry validation to match the spanning
+  tree specification. The receive path now verifies that the
+  ancestry is structurally consistent with the signed parent
+  declaration before mutating tree state.
 
 ## [0.2.0] - 2026-03-22
 
