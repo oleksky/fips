@@ -13,28 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `.deb` packages on `v*` tag push, with SHA-256 checksums
 - AUR publish workflow for tagged stable releases
 
-### Security
+### Changed
 
-- Bloom filter poisoning defense. Reject inbound FilterAnnounce
-  messages whose false-positive rate exceeds a configurable cap
-  (`node.bloom.max_inbound_fpr`, default 0.05). Previously a peer
-  running a modified build could send an all-ones filter, causing
-  (1) lookup attraction / black-hole routing for unknown targets,
-  (2) aggregation contamination as the poisoned bits propagated one
-  hop per announce tick via strict-OR merging, and (3) mesh-size
-  estimate blowup to `f64::INFINITY`. Rejection is silent on the
-  wire; rejected announces log at WARN and increment a new
-  `bloom.fill_exceeded` counter. The peer's prior accepted filter
-  and sequence number are preserved on rejection so a single bad
-  announce cannot wipe a peer's contribution to aggregation.
-  An independent self-plausibility WARN fires (rate-limited to once
-  per 60s) if our own outgoing filter ever exceeds the cap,
-  surfacing aggregation drift or ingress-check bypasses.
-  `BloomFilter::estimated_count` now returns `Option<f64>` and
-  returns `None` for saturated filters, preventing `f64::INFINITY`
-  from propagating into mesh-size estimates. The node-level
-  `estimated_mesh_size` field (already `Option<u64>`) propagates
-  `None` when any contributing filter is above cap.
+- Validate bloom filter fill ratio on FilterAnnounce ingress.
+  Inbound FilterAnnounce messages whose derived false-positive
+  rate exceeds `node.bloom.max_inbound_fpr` (new config field,
+  default 0.05) are rejected silently on the wire, logged at WARN,
+  and counted in a new `bloom.fill_exceeded` counter. A
+  rate-limited WARN also fires if our own outgoing filter's FPR
+  exceeds the cap. `BloomFilter::estimated_count` now takes
+  `max_fpr` and returns `Option<f64>`, returning `None` for
+  saturated filters; this propagates through `compute_mesh_size`
+  into `estimated_mesh_size` (already `Option<u64>`)
 
 ### Fixed
 
@@ -71,6 +61,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tree specification. The receive path now verifies that the
   ancestry is structurally consistent with the signed parent
   declaration before mutating tree state.
+- Make the tree ancestry acceptance unit test deterministic.
+  `test_tree_announce_validate_semantics_accepts_valid_non_root`
+  generated a random signing identity while pinning the fixed root
+  to `node_addr[0] = 0x01`; about 2 in 256 random identities were
+  numerically smaller than the claimed root, triggering
+  `AncestryRootNotMinimum`. The test now regenerates the identity
+  until its `node_addr` is strictly larger than both the fixed
+  parent and root.
 
 ## [0.2.0] - 2026-03-22
 
