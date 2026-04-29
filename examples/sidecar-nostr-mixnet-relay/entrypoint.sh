@@ -9,6 +9,7 @@ FIPS_UDP_BIND="${FIPS_UDP_BIND:-0.0.0.0:2121}"
 FIPS_TCP_BIND="${FIPS_TCP_BIND:-0.0.0.0:8443}"
 FIPS_TUN_MTU="${FIPS_TUN_MTU:-1280}"
 FIPS_PEER_TRANSPORT="${FIPS_PEER_TRANSPORT:-udp}"
+FIPS_NYM_SOCKS5_ADDR="${FIPS_NYM_SOCKS5_ADDR:-127.0.0.1:1080}"
 
 mkdir -p /etc/fips
 
@@ -22,6 +23,14 @@ if [ -n "$FIPS_PEER_NPUB" ] && [ -n "$FIPS_PEER_ADDR" ]; then
       - transport: ${FIPS_PEER_TRANSPORT}
         addr: \"${FIPS_PEER_ADDR}\"
     connect_policy: auto_connect"
+fi
+
+# Build optional Nym transport section if requested.
+NYM_SECTION=""
+if [ "$FIPS_PEER_TRANSPORT" = "nym" ]; then
+    NYM_SECTION="  nym:
+    socks5_addr: \"${FIPS_NYM_SOCKS5_ADDR}\"
+    startup_timeout_secs: 120"
 fi
 
 cat > /etc/fips/fips.yaml <<EOF
@@ -44,19 +53,24 @@ transports:
     mtu: 1472
   tcp:
     bind_addr: "${FIPS_TCP_BIND}"
+${NYM_SECTION}
 
 peers:
 ${PEERS_SECTION:-  []}
 EOF
 
-echo "Generated /etc/fips/fips.yaml"
+echo "========================================"
+echo "  FIPS Node Configuration"
+echo "========================================"
+cat /etc/fips/fips.yaml
+echo "========================================"
 
 # --- Apply iptables rules for strict network isolation ---
 #
-# Goal: only FIPS UDP transport (port 2121) may use eth0.
-# All other eth0 traffic is dropped. fips0 and loopback are unrestricted.
-# This ensures the app container (sharing this network namespace) can only
-# communicate over the FIPS mesh.
+# Goal: only FIPS transport traffic may use eth0. All other eth0 traffic is
+# dropped. fips0 and loopback are unrestricted. This ensures the app
+# container (sharing this network namespace) can only communicate over the
+# FIPS mesh.
 
 # IPv4: allow only FIPS transport on eth0
 iptables -A OUTPUT -o lo -j ACCEPT
@@ -67,6 +81,12 @@ iptables -A INPUT  -i eth0 -p udp --dport 2121 -j ACCEPT
 iptables -A INPUT  -i eth0 -p udp --sport 2121 -j ACCEPT
 iptables -A OUTPUT -o eth0 -p tcp --dport 443 -j ACCEPT
 iptables -A INPUT  -i eth0 -p tcp --sport 443 -j ACCEPT
+# When nym is active, the nym-socks5-client (running in the same netns)
+# needs outbound TCP to Nym mixnet gateways.
+if [ "$FIPS_PEER_TRANSPORT" = "nym" ]; then
+    iptables -A OUTPUT -o eth0 -p tcp -j ACCEPT
+    iptables -A INPUT  -i eth0 -p tcp -m state --state ESTABLISHED,RELATED -j ACCEPT
+fi
 iptables -A OUTPUT -o eth0 -j DROP
 iptables -A INPUT  -i eth0 -j DROP
 
@@ -83,4 +103,13 @@ echo "iptables isolation rules applied"
 # --- Start dnsmasq and launch FIPS ---
 
 dnsmasq
+
+if [ "$FIPS_PEER_TRANSPORT" = "nym" ]; then
+    echo "========================================"
+    echo "  Nym transport mode: FIPS will wait for nym-socks5-client"
+    echo "  SOCKS5 addr: ${FIPS_NYM_SOCKS5_ADDR}"
+    echo "========================================"
+fi
+
+echo "Starting FIPS daemon..."
 exec fips --config /etc/fips/fips.yaml

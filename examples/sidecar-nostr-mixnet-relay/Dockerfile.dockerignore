@@ -3,4 +3,4 @@ target/
 .github/
 testing/
 examples/
-!examples/sidecar-nostr-relay/
+!examples/sidecar-nostr-mixnet-relay/

@@ -10,7 +10,7 @@ services:
   fips:
     build:
       context: ../..
-      dockerfile: examples/sidecar-nostr-relay/Dockerfile
+      dockerfile: examples/sidecar-nostr-mixnet-relay/Dockerfile
     hostname: fips-sidecar
     cap_add:
       - NET_ADMIN
@@ -32,11 +32,36 @@ services:
       - FIPS_UDP_BIND=${FIPS_UDP_BIND:-0.0.0.0:2121}
       - FIPS_TUN_MTU=${FIPS_TUN_MTU:-1280}
       - FIPS_PEER_TRANSPORT=${FIPS_PEER_TRANSPORT:-udp}
+      - FIPS_NYM_SOCKS5_ADDR=${FIPS_NYM_SOCKS5_ADDR:-127.0.0.1:1080}
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
     networks:
       fips-net:
         ipv4_address: ${FIPS_IPV4:-172.20.1.20}
+
+  # Nym mixnet SOCKS5 sidecar.
+  # Activated by COMPOSE_PROFILES=${FIPS_PEER_TRANSPORT} in .env, so a
+  # single switch (FIPS_PEER_TRANSPORT) controls both the FIPS transport
+  # and whether this sidecar runs. They are always in sync.
+  nym:
+    profiles:
+      - nym
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.nym
+    network_mode: "service:fips"
+    restart: unless-stopped
+    depends_on:
+      - fips
+    environment:
+      - NYM_CLIENT_ID=${NYM_CLIENT_ID:-fips-nym-client}
+      - NYM_SOCKS5_PORT=${NYM_SOCKS5_PORT:-1080}
+      - NYM_SOCKS5_BIND=${NYM_SOCKS5_BIND:-0.0.0.0}
+      - NYM_SERVICE_PROVIDER=${NYM_SERVICE_PROVIDER:-}
+      - NYM_MNEMONIC=${NYM_MNEMONIC:-}
+    volumes:
+      - nym-data:/root/.nym
 
   app:
     build:
@@ -53,3 +78,4 @@ services:
 
 volumes:
   relay-data:
+  nym-data:

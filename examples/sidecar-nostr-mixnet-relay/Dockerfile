@@ -3,14 +3,14 @@ FROM rust:1.94-slim-trixie AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        pkg-config && \
+        pkg-config libdbus-1-dev libnftnl-dev libclang-dev clang && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
 COPY src ./src
 
-RUN cargo build --release --no-default-features --features tui && \
+RUN cargo build --release && \
     cp target/release/fips target/release/fipsctl target/release/fipstop /usr/local/bin/
 
 # ── Runtime stage ──
@@ -18,7 +18,7 @@ FROM debian:trixie-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        ca-certificates \
+        ca-certificates libdbus-1-3 libnftnl11 \
         iproute2 iputils-ping dnsutils dnsmasq iptables \
         openssh-client openssh-server python3 \
         tcpdump netcat-openbsd curl iperf3 && \
@@ -63,6 +63,6 @@ RUN printf '%s\n' \
 
 COPY --from=builder /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop /usr/local/bin/
 
-COPY examples/sidecar-nostr-relay/entrypoint.sh /entrypoint.sh
+COPY examples/sidecar-nostr-mixnet-relay/entrypoint.sh /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

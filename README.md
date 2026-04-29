@@ -338,11 +338,14 @@ including static topology tests and stochastic chaos simulation.
 
 ## Examples
 
-- [examples/sidecar-nostr-relay/](examples/sidecar-nostr-relay/) —
+- [examples/sidecar-nostr-mixnet-relay/](examples/sidecar-nostr-mixnet-relay/) —
   Run a [strfry](https://github.com/hoytech/strfry) Nostr relay
   reachable exclusively over the FIPS mesh. The relay container shares
   the FIPS sidecar's network namespace and is isolated from the host
-  network.
+  network. Includes an optional `nym-socks5-client` sidecar (compose
+  profile `nym`) that lets the FIPS peer link route through the
+  [Nym](https://nymtech.net/) mixnet — see the example's README for the
+  enable/disable instructions.
 - [examples/k8s-sidecar/](examples/k8s-sidecar/) — Run FIPS as a
   Kubernetes Pod sidecar. The sidecar creates `fips0` in the Pod's
   shared network namespace so every other container in the Pod gets

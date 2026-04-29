@@ -1,0 +1,24 @@
+# Dockerfile for nym-socks5-client sidecar.
+#
+# Downloads the official pre-built amd64 binary from GitHub releases.
+# On arm64 (M1/M2 Mac), Docker runs this under Rosetta emulation
+# via the --platform linux/amd64 setting in docker-compose.yml.
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Download nym-socks5-client binary from official GitHub releases
+RUN curl -sSL --retry 3 \
+        "https://github.com/nymtech/nym/releases/download/nym-binaries-v2026.6-stilton/nym-socks5-client" \
+        -o /usr/local/bin/nym-socks5-client && \
+    chmod +x /usr/local/bin/nym-socks5-client && \
+    echo "Installed:" && /usr/local/bin/nym-socks5-client --version
+
+COPY nym-entrypoint.sh /nym-entrypoint.sh
+RUN chmod +x /nym-entrypoint.sh
+
+ENTRYPOINT ["/nym-entrypoint.sh"]
